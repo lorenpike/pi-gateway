@@ -14,7 +14,7 @@ export
 # TARGETS
 .PHONY: docker
 docker: $(BUILD)/docker-stamp $(BUILD)/auth.json
-	@docker run -it --rm \
+	@docker run -d \
 		--name $(IMAGE) \
 		-e WALLE_TOKEN \
 		-e WALLE_PORT \
