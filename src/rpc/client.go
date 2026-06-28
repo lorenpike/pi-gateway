@@ -391,22 +391,24 @@ func (c *Client) send(ctx context.Context, cmd map[string]any) (Response, error)
 	}
 }
 
-// newClientFromStreams constructs a Client over already-open streams
-// (stdin/stdout pipes) without spawning a process. It is used by tests with
-// the fake pi; production code uses New().
-func newClientFromStreams(stdin io.WriteCloser, stdout io.ReadCloser, cfg Config) *Client {
+// NewClientFromStreams constructs a Client over already-open streams
+// (stdin/stdout pipes) without spawning a process. It is intended for advanced
+// in-process transports and for tests with a fake pi; production code uses
+// New(). The stdin must be a write end (Client writes commands to it) and
+// stdout a read end (Client reads events from it). Both are closed by Close.
+func NewClientFromStreams(stdin io.WriteCloser, stdout io.ReadCloser, cfg Config) *Client {
 	if cfg.UIPolicy == (ExtensionUIPolicy{}) {
 		cfg.UIPolicy = DefaultExtensionUIPolicy()
 	}
 	c := &Client{
-		stdin:     stdin,
-		stdout:    stdout,
-		cfg:       cfg,
-		lr:         NewLineReader(stdout),
-		inflight:   make(map[string]chan Response),
-		eventsCh:   make(chan Event, 64),
-		uiCh:       make(chan []byte, 16),
-		doneCh:     make(chan struct{}),
+		stdin:   stdin,
+		stdout:  stdout,
+		cfg:     cfg,
+		lr:      NewLineReader(stdout),
+		inflight: make(map[string]chan Response),
+		eventsCh: make(chan Event, 64),
+		uiCh:     make(chan []byte, 16),
+		doneCh:   make(chan struct{}),
 		// cmd is nil; Close() must handle that.
 	}
 	go c.run()

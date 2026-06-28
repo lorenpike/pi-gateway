@@ -30,7 +30,7 @@ func newClientWithFake(t *testing.T, handler func(f *fakePI, cmd map[string]any)
 			handler(f, cmd)
 		}
 	})
-	c := newClientFromStreams(f.stdinWriter, f.stdoutReader, Config{
+	c := NewClientFromStreams(f.stdinWriter, f.stdoutReader, Config{
 		UIPolicy: DefaultExtensionUIPolicy(),
 	})
 	t.Cleanup(func() {
