@@ -18,6 +18,8 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json
 		--name $(IMAGE) \
 		-e WALLE_TOKEN \
 		-e WALLE_PORT \
+		-e WALLE_TELEGRAM_TOKEN \
+		-e WALLE_TELEGRAM_ALLOWED_CHATS \
 		-e OPENAI_API_KEY \
 		-e OPENROUTER_API_KEY \
 		-v "./$(BUILD)/auth.json:$(AUTH_FILE)" \
@@ -34,6 +36,15 @@ test:
 	else \
 		go test -count=1 ./...; \
 	fi
+
+# Sphinx docs (see docs/Makefile). uv provides sphinx + myst-parser + furo.
+.PHONY: docs docs-html docs-dev docs-clean
+docs docs-html:
+	@$(MAKE) -C docs html
+docs-dev:
+	@$(MAKE) -C docs dev
+docs-clean:
+	@$(MAKE) -C docs clean
 
 # RECIPES
 $(BUILD)/docker-stamp: $(DOCKER_DEPS)

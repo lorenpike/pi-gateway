@@ -44,6 +44,22 @@ import (
 	"wall-e/session"
 )
 
+// ChatConfig is the gateway-wide chat front-end config (Phase 6+). It is
+// defined here rather than in chat/ to keep config the single owner of env
+// parsing; the values are copied into a chat.Config by main.
+type ChatConfig struct {
+	// Telegram holds the parsed WALLE_TELEGRAM_* values.
+	Telegram TelegramConfig
+}
+
+// TelegramConfig holds the Telegram front-end settings.
+type TelegramConfig struct {
+	// Token is the bot token (empty → Telegram front-end disabled).
+	Token string
+	// AllowedChats is the optional chat-id allowlist (empty = allow all).
+	AllowedChats []int64
+}
+
 // Default values. Exported so tests and main can reference them.
 const (
 	DefaultPort             = "8080"
@@ -74,6 +90,9 @@ type Config struct {
 	// container wiring (mkdir at startup) and by the Dockerfile, and pulling
 	// it back out of session.Config is awkward.
 	SessionDir string
+
+	// Chat holds the optional chat front-end configs (Telegram, ...).
+	Chat ChatConfig
 }
 
 // Load reads WALLE_* env vars and returns a fully-populated Config with all
@@ -180,6 +199,16 @@ func Load() (Config, error) {
 	}
 	cfg.LogLevel = logLevel
 
+	// --- WALLE_TELEGRAM_TOKEN / WALLE_TELEGRAM_ALLOWED_CHATS -------------
+	// Telegram is optional: if the token is unset, the front-end is skipped
+	// (HTTP still serves). The allowlist is a comma-separated list of chat ids.
+	cfg.Chat.Telegram.Token = os.Getenv("WALLE_TELEGRAM_TOKEN")
+	allowedChats, err := parseInt64ListEnv("WALLE_TELEGRAM_ALLOWED_CHATS")
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	cfg.Chat.Telegram.AllowedChats = allowedChats
+
 	if len(errs) > 0 {
 		return cfg, fmt.Errorf("config: %s", strings.Join(errs, "; "))
 	}
@@ -240,4 +269,28 @@ func isValidLogLevel(s string) bool {
 		return true
 	}
 	return false
+}
+
+// parseInt64ListEnv reads a comma-separated list of int64 values (e.g.
+// "123,-456,789"). An empty/unset value returns nil (no error) so the var is
+// optional. Whitespace around each element is trimmed.
+func parseInt64ListEnv(name string) ([]int64, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return nil, nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]int64, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(p, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %w", name, v, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }

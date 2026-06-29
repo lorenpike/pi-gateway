@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"wall-e/chat"
 	"wall-e/config"
 	"wall-e/httpapi"
 	"wall-e/pool"
@@ -106,6 +107,27 @@ func run(ctx context.Context, cfg config.Config) error {
 		serveErr <- httpServer.Serve(listener)
 	}()
 
+	// 5. Optional chat front-ends. Telegram is started only if a bot token is
+	//    configured; otherwise the gateway serves HTTP alone. A Start failure
+	//    (e.g. bad token / network) is logged but non-fatal — HTTP still serves.
+	var frontends []chat.Frontend
+	if cfg.Chat.Telegram.Token != "" {
+		tb, err := chat.NewTelegram(chat.Config{
+			Token:        cfg.Chat.Telegram.Token,
+			AllowedChats: cfg.Chat.Telegram.AllowedChats,
+		}, p, nil)
+		if err != nil {
+			log.Printf("telegram: disabled: %v", err)
+		} else if err := tb.Start(ctx); err != nil {
+			log.Printf("telegram: start failed: %v (HTTP still serves)", err)
+		} else {
+			frontends = append(frontends, tb)
+			log.Printf("telegram: front-end started")
+		}
+	} else {
+		log.Printf("telegram: disabled (WALLE_TELEGRAM_TOKEN unset)")
+	}
+
 	// 4. Wait for a signal (ctx cancel) or a serve failure (e.g. bind lost).
 	select {
 	case err := <-serveErr:
@@ -141,6 +163,18 @@ func run(ctx context.Context, cfg config.Config) error {
 			log.Printf("pool shutdown: %v", err)
 		}
 	}()
+	// Stop chat front-ends concurrently too: their Stop cancels the poll loop
+	// and drains in-flight turns (bounded), which in turn Releases slots so the
+	// pool/pool shutdown can complete.
+	for _, fe := range frontends {
+		wg.Add(1)
+		go func(fe chat.Frontend) {
+			defer wg.Done()
+			if err := fe.Stop(shutCtx); err != nil {
+				log.Printf("chat shutdown: %v", err)
+			}
+		}(fe)
+	}
 	wg.Wait()
 
 	// Drain Serve's return value (ErrServerClosed after Shutdown).

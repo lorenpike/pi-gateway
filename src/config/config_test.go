@@ -23,6 +23,8 @@ var allWalleEnv = []string{
 	"WALLE_MODEL",
 	"WALLE_CONFIRM_DEFAULT",
 	"WALLE_LOG_LEVEL",
+	"WALLE_TELEGRAM_TOKEN",
+	"WALLE_TELEGRAM_ALLOWED_CHATS",
 }
 
 // clearWalleEnv unsets every WALLE_* var Load reads, for a known-clean start.
@@ -317,6 +319,76 @@ func TestLoad_MultipleErrorsAllReported(t *testing.T) {
 			t.Errorf("error %q does not mention %s", msg, want)
 		}
 	}
+}
+
+func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
+	t.Run("defaults: unset token → disabled, no allowlist", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Chat.Telegram.Token != "" {
+			t.Errorf("Telegram.Token = %q, want empty", cfg.Chat.Telegram.Token)
+		}
+		if cfg.Chat.Telegram.AllowedChats != nil {
+			t.Errorf("Telegram.AllowedChats = %v, want nil", cfg.Chat.Telegram.AllowedChats)
+		}
+	})
+
+	t.Run("token + allowlist parsed", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+		t.Setenv("WALLE_TELEGRAM_TOKEN", "123:ABC")
+		t.Setenv("WALLE_TELEGRAM_ALLOWED_CHATS", " 42, -7 , 999")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Chat.Telegram.Token != "123:ABC" {
+			t.Errorf("Telegram.Token = %q", cfg.Chat.Telegram.Token)
+		}
+		want := []int64{42, -7, 999}
+		if len(cfg.Chat.Telegram.AllowedChats) != len(want) {
+			t.Fatalf("AllowedChats = %v, want %v", cfg.Chat.Telegram.AllowedChats, want)
+		}
+		for i := range want {
+			if cfg.Chat.Telegram.AllowedChats[i] != want[i] {
+				t.Errorf("AllowedChats[%d] = %d, want %d", i, cfg.Chat.Telegram.AllowedChats[i], want[i])
+			}
+		}
+	})
+
+	t.Run("empty allowlist is nil", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+		t.Setenv("WALLE_TELEGRAM_ALLOWED_CHATS", "")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Chat.Telegram.AllowedChats != nil {
+			t.Errorf("AllowedChats = %v, want nil", cfg.Chat.Telegram.AllowedChats)
+		}
+	})
+
+	t.Run("bad allowlist rejected", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+		t.Setenv("WALLE_TELEGRAM_ALLOWED_CHATS", "42,notanumber")
+
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error for bad allowlist, got nil")
+		}
+		if !contains(err.Error(), "WALLE_TELEGRAM_ALLOWED_CHATS") {
+			t.Errorf("error %q does not mention WALLE_TELEGRAM_ALLOWED_CHATS", err.Error())
+		}
+	})
 }
 
 // contains is a tiny strings.Contains so the test file doesn't need to import

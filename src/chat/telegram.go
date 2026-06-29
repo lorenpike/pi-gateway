@@ -1,0 +1,152 @@
+package chat
+
+// telegram.go is the real TelegramAPI adapter: a thin shim over the Telegram
+// Bot API (https://api.telegram.org/bot<token>/<method>) using only net/http.
+// This keeps the gateway stdlib-only (no go-telegram-bot-api / telebot dep):
+// the four methods wall-e needs (getMe, getUpdates, sendMessage,
+// editMessageText) are trivial JSON POSTs.
+//
+// Tradeoff note (Phase 6 decision): hand-rolling preserves the module's
+// zero-third-party-dep invariant and the plan's "stdlib-only" framing, at the
+// cost of re-implementing request/response envelopes and (later) retry/backoff
+// that a library would provide. For v1's four calls + long-poll getUpdates the
+// surface is small enough that hand-rolling is the lighter choice; revisit if we
+// need inline keyboards, file uploads, webhook handling, or sophisticated rate
+// limiting.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+const defaultTelegramBaseURL = "https://api.telegram.org"
+
+// httpAPI is the real TelegramAPI over net/http.
+type httpAPI struct {
+	token  string
+	base   string
+	client *http.Client
+}
+
+func newHTTPTelegramAPI(token, base string) TelegramAPI {
+	return &httpAPI{
+		token: token,
+		base:  base,
+		// Long-poll getUpdates may block ~30s; allow generous headroom.
+		client: &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+// tgResponse is the common envelope of every Telegram API response.
+type tgResponse struct {
+	OK          bool            `json:"ok"`
+	Description string          `json:"description,omitempty"`
+	ErrorCode   int             `json:"error_code,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+}
+
+func (h *httpAPI) call(ctx context.Context, method string, payload map[string]any, result any) error {
+	var body io.Reader
+	if payload != nil {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("telegram: marshal %s: %w", method, err)
+		}
+		body = bytes.NewReader(b)
+	}
+	url := fmt.Sprintf("%s/bot%s/%s", h.base, h.token, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return fmt.Errorf("telegram: request %s: %w", method, err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram: call %s: %w", method, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("telegram: read %s: %w", method, err)
+	}
+	var env tgResponse
+	if err := json.Unmarshal(data, &env); err != nil {
+		return fmt.Errorf("telegram: decode %s: %w", method, err)
+	}
+	if !env.OK {
+		return fmt.Errorf("telegram: %s failed: %s (code %d)", method, env.Description, env.ErrorCode)
+	}
+	if result != nil && len(env.Result) > 0 {
+		if err := json.Unmarshal(env.Result, result); err != nil {
+			return fmt.Errorf("telegram: decode %s result: %w", method, err)
+		}
+	}
+	return nil
+}
+
+func (h *httpAPI) GetMe(ctx context.Context) (User, error) {
+	var u User
+	if err := h.call(ctx, "getMe", nil, &u); err != nil {
+		return User{}, err
+	}
+	return u, nil
+}
+
+func (h *httpAPI) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Update, error) {
+	payload := map[string]any{
+		"timeout":          timeout,
+		"allowed_updates":  []string{"message"},
+	}
+	if offset > 0 {
+		payload["offset"] = offset
+	}
+	// Override the client timeout for long-poll: timeout (sec) + headroom.
+	saved := h.client.Timeout
+	h.client.Timeout = time.Duration(timeout)*time.Second + 10*time.Second
+	defer func() { h.client.Timeout = saved }()
+
+	var ups []Update
+	if err := h.call(ctx, "getUpdates", payload, &ups); err != nil {
+		return nil, err
+	}
+	return ups, nil
+}
+
+func (h *httpAPI) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (Message, error) {
+	payload := map[string]any{
+		"chat_id": chatID,
+		"text":    text,
+	}
+	if replyTo > 0 {
+		payload["reply_to_message_id"] = replyTo
+	}
+	var msg Message
+	if err := h.call(ctx, "sendMessage", payload, &msg); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+func (h *httpAPI) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error {
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"text":       text,
+	}
+	// editMessageText returns the edited Message in result; we ignore it. A
+	// "message is not modified" error is surfaced to the caller (logged by the
+	// bot, non-fatal).
+	if err := h.call(ctx, "editMessageText", payload, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+

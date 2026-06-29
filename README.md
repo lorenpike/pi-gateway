@@ -57,6 +57,8 @@ real model call requires those credentials to be valid.
 | `WALLE_MODEL` | no | from pi settings | `--model` |
 | `WALLE_CONFIRM_DEFAULT` | no | `true` | auto-answer `confirm` dialogs |
 | `WALLE_LOG_LEVEL` | no | `info` | `debug`/`info`/`warn`/`error` |
+| `WALLE_TELEGRAM_TOKEN` | no | — | Telegram bot token; if unset the Telegram front-end is skipped (HTTP still serves) |
+| `WALLE_TELEGRAM_ALLOWED_CHATS` | no | — | comma-separated chat-id allowlist; unset = allow all |
 
 ## Develop
 
@@ -69,4 +71,4 @@ make debug          # throwaway tmux container for manual `pi` TUI access
 The Go module lives under `src/` (`module wall-e`, stdlib-only). Packages:
 `rpc/` (pi JSONL client), `session/` (channel→transcript map),
 `pool/` (bounded worker pool), `httpapi/` (`/health` + `/v1/prompt` SSE),
-`config/` (env parsing), and `main.go` (wiring + signal handling).
+`chat/` (Telegram front-end), `config/` (env parsing), `main` (wiring).
