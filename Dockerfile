@@ -49,26 +49,26 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 RUN ln -s "$(which fdfind)" /usr/local/bin/fd && \
     ln -s "$(which nvim)" /usr/local/bin/vi
 
-ARG USERNAME=wall-e
 RUN deluser --remove-home ubuntu && \
-    useradd -ms /bin/bash $USERNAME && \
-    chown -R $USERNAME:$USERNAME /home/$USERNAME && \
-    mkdir -p /opt/pi && chown -R $USERNAME:$USERNAME /opt/pi && \
-    mkdir -p /home/$USERNAME/sessions && \
-    chown -R $USERNAME:$USERNAME /home/$USERNAME/sessions && \
-    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+    useradd -ms /bin/bash wall-e && \
+    chown -R wall-e:wall-e /home/wall-e && \
+    mkdir -p /opt/pi && chown -R wall-e:wall-e /opt/pi && \
+    mkdir -p /home/wall-e/sessions && \
+    chown -R wall-e:wall-e /home/wall-e/sessions && \
+    echo "wall-e ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 COPY --from=build /usr/local/bin/wall-e /usr/local/bin/wall-e
+COPY --chown=wall-e:wall-e static/SOUL.md /home/wall-e/SOUL.md
 
-USER $USERNAME
-WORKDIR /home/$USERNAME
+USER wall-e
+WORKDIR /home/wall-e
 
-COPY static/.vimrc static/.tmux.conf ./
+COPY --chown=wall-e:wall-e static/.vimrc static/.tmux.conf ./
 RUN mkdir -p .config/nvim && cp .vimrc .config/nvim/init.vim
 
 ENV WALLE_SESSION_DIR=/home/wall-e/sessions
 ENV PI_CODING_AGENT_DIR=/opt/pi
-COPY static/APPEND_SYSTEM.md /opt/pi
+COPY --chown=wall-e:wall-e static/APPEND_SYSTEM.md /opt/pi
 
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

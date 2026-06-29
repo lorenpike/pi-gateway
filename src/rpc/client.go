@@ -59,15 +59,15 @@ type Client struct {
 	inflightMu sync.Mutex
 	inflight   map[string]chan Response
 
-	eventsMu sync.Mutex
-	eventsCh chan Event
+	eventsMu     sync.Mutex
+	eventsCh     chan Event
 	eventsClosed bool
 
 	uiCh chan []byte // raw extension_ui_request frames, hand off to uiLoop
 
-	closed   atomic.Bool
-	closeMu  sync.Mutex
-	doneCh   chan struct{} // closed when run() exits
+	closed  atomic.Bool
+	closeMu sync.Mutex
+	doneCh  chan struct{} // closed when run() exits
 
 	sessionFile   string
 	sessionFileMu sync.RWMutex
@@ -86,6 +86,10 @@ type Config struct {
 	Provider string
 	// Model is passed via --model ("" = omit, use pi settings).
 	Model string
+	// SystemPrompt is passed via --system-prompt ("" = omit, use pi default).
+	// pi treats the value as a file path when it exists, otherwise as literal
+	// prompt text.
+	SystemPrompt string
 	// SessionDir is passed via --session-dir ("" = omit, use pi default).
 	SessionDir string
 	// NoSession passes --no-session (disables persistence). Mutually exclusive
@@ -139,6 +143,9 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
+	if cfg.SystemPrompt != "" {
+		args = append(args, "--system-prompt", cfg.SystemPrompt)
+	}
 	if cfg.SessionDir != "" {
 		args = append(args, "--session-dir", cfg.SessionDir)
 	} else if cfg.NoSession {
@@ -174,11 +181,11 @@ func New(cfg Config) (*Client, error) {
 		stdin:    stdin,
 		stdout:   stdout,
 		cfg:      cfg,
-		lr:        NewLineReader(stdout),
-		inflight:  make(map[string]chan Response),
-		eventsCh:  make(chan Event, 64),
-		uiCh:      make(chan []byte, 16),
-		doneCh:    make(chan struct{}),
+		lr:       NewLineReader(stdout),
+		inflight: make(map[string]chan Response),
+		eventsCh: make(chan Event, 64),
+		uiCh:     make(chan []byte, 16),
+		doneCh:   make(chan struct{}),
 	}
 
 	go c.run()
@@ -401,10 +408,10 @@ func NewClientFromStreams(stdin io.WriteCloser, stdout io.ReadCloser, cfg Config
 		cfg.UIPolicy = DefaultExtensionUIPolicy()
 	}
 	c := &Client{
-		stdin:   stdin,
-		stdout:  stdout,
-		cfg:     cfg,
-		lr:      NewLineReader(stdout),
+		stdin:    stdin,
+		stdout:   stdout,
+		cfg:      cfg,
+		lr:       NewLineReader(stdout),
 		inflight: make(map[string]chan Response),
 		eventsCh: make(chan Event, 64),
 		uiCh:     make(chan []byte, 16),
@@ -605,7 +612,7 @@ func (c *Client) SetModel(ctx context.Context, provider, modelID string) (Respon
 	return c.send(ctx, map[string]any{
 		"type":     "set_model",
 		"provider": provider,
-		"modelId":   modelID,
+		"modelId":  modelID,
 	})
 }
 

@@ -67,6 +67,7 @@ const (
 	DefaultDrainTimeout     = 30 * time.Second
 	DefaultSessionDir       = "/home/wall-e/sessions"
 	DefaultPiBin            = "pi"
+	DefaultSystemPrompt     = "SOUL.md"
 	DefaultConfirmDefault   = true
 	DefaultLogLevel         = "info"
 	DefaultHTTPQueueTimeout = 60 * time.Second
@@ -151,7 +152,7 @@ func Load() (Config, error) {
 	}
 
 	cfg.Pool = pool.Config{
-		Size:        poolSize,
+		Size:         poolSize,
 		DrainTimeout: drainTimeout,
 		// RPCConfig, Sessions, NewClient are wired by main (Load doesn't know
 		// how to build a *session.Manager; that requires MkdirAll which is a
@@ -182,11 +183,12 @@ func Load() (Config, error) {
 	}
 
 	cfg.RPC = rpc.Config{
-		PiBin:     piBin,
-		Provider:  provider,
-		Model:     model,
-		SessionDir: sessionDir,
-		UIPolicy:  rpc.ExtensionUIPolicy{ConfirmedDefault: confirmDefault},
+		PiBin:        piBin,
+		Provider:     provider,
+		Model:        model,
+		SystemPrompt: DefaultSystemPrompt,
+		SessionDir:   sessionDir,
+		UIPolicy:     rpc.ExtensionUIPolicy{ConfirmedDefault: confirmDefault},
 	}
 
 	// --- WALLE_LOG_LEVEL (default info) ---------------------------------

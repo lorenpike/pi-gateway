@@ -2,4 +2,5 @@ build/
 .ruff_cache/
 __pycache__/
 archive/
+.gotmp/
 .env

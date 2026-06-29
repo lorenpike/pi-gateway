@@ -42,6 +42,11 @@ The container passes `OPENAI_API_KEY` / `OPENROUTER_API_KEY` through to pi, and
 bind-mounts `build/auth.json` and `build/pi-settings.json` into `/opt/pi`. A
 real model call requires those credentials to be valid.
 
+The Docker image seeds `/home/wall-e/SOUL.md`. Since the container workdir is
+`/home/wall-e`, every spawned `pi --mode rpc` process receives
+`--system-prompt SOUL.md`. `/opt/pi/APPEND_SYSTEM.md` is still loaded by pi as
+appended environment context.
+
 ## Configuration
 
 | Var | Required | Default | Notes |
