@@ -22,6 +22,11 @@ import (
 	"wall-e/config"
 )
 
+// localhostAddr returns a loopback-only listen address for tests. Binding the
+// test server to ":port" asks Windows Firewall for public/private network
+// access every time go test builds a new temporary exe; loopback avoids that.
+func localhostAddr(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
+
 // freePort finds a TCP port that is free to bind on localhost by opening a
 // listener and immediately closing it. There is an inherent (tiny) race that
 // another process grabs the port in between; tests retry on bind failure.
@@ -84,6 +89,7 @@ func TestRun_StartsAndShutsDownCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
+	cfg.HTTP.Addr = localhostAddr(port)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -91,7 +97,7 @@ func TestRun_StartsAndShutsDownCleanly(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- run(ctx, cfg) }()
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := localhostAddr(port)
 	if !healthOK(t, addr) {
 		cancel()
 		t.Fatalf("server did not become healthy on %s", addr)
@@ -113,28 +119,21 @@ func TestRun_StartsAndShutsDownCleanly(t *testing.T) {
 // TestRun_BindFailureReturnsError asserts that if the HTTP server cannot bind
 // (port already in use), run returns an error rather than hanging.
 //
-// It pre-binds the SAME address form run uses (`:port`, which on this host
-// binds the IPv6/dual-stack wildcard) so the second Listen in run() genuinely
-// conflicts. Because port-conflict behavior is mildly platform-dependent
-// (dual-stack can let an IPv4 and an IPv6 bind coexist on the same port), the
-// test runs run() in a goroutine: if run returns an error we pass; if run
-// instead starts serving (premise didn't hold) we cancel and skip rather than
-// hang.
+// It pre-binds the SAME loopback address form run uses so the second Listen in
+// run() genuinely conflicts, without asking Windows Firewall for public/private
+// network access. The test runs run() in a goroutine: if run returns an error
+// we pass; if run instead starts serving (platform quirk), we cancel and skip
+// rather than hang.
 func TestRun_BindFailureReturnsError(t *testing.T) {
 	clearWalleEnv(t)
 
-	// Find a free port, then re-bind the same `:port` form run will use so the
-	// conflict is on the identical socket address.
-	probe, err := net.Listen("tcp", ":0")
+	// Find a free port, then re-bind the same loopback address run will use so
+	// the conflict is on the identical socket address.
+	port := freePort(t)
+	addr := localhostAddr(port)
+	blocker, err := net.Listen("tcp", addr)
 	if err != nil {
-		t.Fatalf("probe listen: %v", err)
-	}
-	port := probe.Addr().(*net.TCPAddr).Port
-	_ = probe.Close()
-
-	blocker, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		t.Skipf("could not pre-bind blocker on :%d: %v (platform quirk)", port, err)
+		t.Skipf("could not pre-bind blocker on %s: %v (platform quirk)", addr, err)
 	}
 	t.Cleanup(func() { _ = blocker.Close() })
 
@@ -147,6 +146,7 @@ func TestRun_BindFailureReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
+	cfg.HTTP.Addr = addr
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -161,11 +161,11 @@ func TestRun_BindFailureReturnsError(t *testing.T) {
 		}
 		// Expected: bind conflict surfaced as an error.
 	case <-time.After(3 * time.Second):
-		// run bound successfully despite the blocker (dual-stack quirk) — the
-		// test premise doesn't hold on this platform; unblock and skip.
+		// run bound successfully despite the blocker — the test premise doesn't
+		// hold on this platform; unblock and skip.
 		cancel()
 		<-runErr
-		t.Skipf("pre-bind did not conflict with run on :%d (dual-stack); skipping", port)
+		t.Skipf("pre-bind did not conflict with run on %s; skipping", addr)
 	}
 }
 
@@ -190,6 +190,7 @@ func TestRun_DrainTimeoutBoundsShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
+	cfg.HTTP.Addr = localhostAddr(port)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -197,7 +198,7 @@ func TestRun_DrainTimeoutBoundsShutdown(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- run(ctx, cfg) }()
 
-	if !healthOK(t, fmt.Sprintf("127.0.0.1:%d", port)) {
+	if !healthOK(t, localhostAddr(port)) {
 		cancel()
 		t.Fatal("server did not become healthy")
 	}

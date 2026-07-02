@@ -10,18 +10,18 @@ The gateway is configured entirely via `WALLE_*` env vars. `WALLE_TOKEN` is
 required (it is the HTTP bearer token); everything else has a sensible default.
 
 ```sh
-# 1. Build the image and run the gateway (detached) on :8080.
+# 1. Build the image and run the gateway (detached) on :6007.
 export WALLE_TOKEN="$(openssl rand -hex 32)"
 make docker
 
 # 2. Health check (no auth required).
-curl http://localhost:8080/health
+curl http://localhost:6007/health
 # {"status":"ok"}
 
 # 3. Send a prompt (bearer auth, SSE stream).
 curl -N -H "Authorization: Bearer $WALLE_TOKEN" \
      -d '{"channel":"smoke","message":"say hi"}' \
-     http://localhost:8080/v1/prompt
+     http://localhost:6007/v1/prompt
 # event: agent_start
 # data: {}
 #
@@ -51,7 +51,7 @@ is still loaded by pi as appended environment context.
 | Var | Required | Default | Notes |
 |---|---|---|---|
 | `WALLE_TOKEN` | yes | — | HTTP bearer token |
-| `WALLE_PORT` | no | `8080` | HTTP listen port |
+| `WALLE_PORT` | no | `6007` | HTTP listen port |
 | `WALLE_POOL_SIZE` | no | `4` | max concurrent `pi` processes |
 | `WALLE_DRAIN_TIMEOUT` | no | `30s` | drain grace on reuse/shutdown |
 | `WALLE_HTTP_QUEUE_TIMEOUT` | no | `60s` | max wait on a busy channel → 503 |

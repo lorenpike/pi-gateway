@@ -48,8 +48,8 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 	if cfg.HTTP.Token != "secret" {
 		t.Errorf("HTTP.Token = %q, want %q", cfg.HTTP.Token, "secret")
 	}
-	if cfg.HTTP.Addr != ":8080" {
-		t.Errorf("HTTP.Addr = %q, want :8080", cfg.HTTP.Addr)
+	if cfg.HTTP.Addr != ":6007" {
+		t.Errorf("HTTP.Addr = %q, want :6007", cfg.HTTP.Addr)
 	}
 	if cfg.HTTP.QueueTimeout != 60*time.Second {
 		t.Errorf("HTTP.QueueTimeout = %v, want 60s", cfg.HTTP.QueueTimeout)

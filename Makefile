@@ -8,6 +8,7 @@ HOME := $(or $(HOME),$(USERPROFILE))
 BOT := wall-e
 AUTH_FILE := /opt/pi/auth.json
 SETTINGS_FILE := /opt/pi/settings.json
+WALLE_PORT ?= 6007
 
 -include .env
 export

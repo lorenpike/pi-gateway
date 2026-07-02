@@ -42,7 +42,7 @@ type Config struct {
 	// Token is the required bearer token for /v1/prompt. Empty disables auth
 	// (dev/test only); New() from env still requires it via WALLE_TOKEN.
 	Token string
-	// Addr is the listen address (e.g. ":8080").
+	// Addr is the listen address (e.g. ":6007").
 	Addr string
 	// QueueTimeout bounds how long Acquire may block on a busy channel before
 	// returning 503. Defaults to 60s.
@@ -75,7 +75,7 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) ListenAndServe() error {
 	addr := s.cfg.Addr
 	if addr == "" {
-		addr = ":8080"
+		addr = ":6007"
 	}
 	srv := &http.Server{Addr: addr, Handler: s.mux}
 	return srv.ListenAndServe()
@@ -88,7 +88,7 @@ func ConfigFromEnv() (Config, error) {
 	cfg := Config{Token: os.Getenv("WALLE_TOKEN")}
 	port := os.Getenv("WALLE_PORT")
 	if port == "" {
-		port = "8080"
+		port = "6007"
 	}
 	cfg.Addr = ":" + port
 	if cfg.Token == "" {

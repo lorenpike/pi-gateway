@@ -72,7 +72,7 @@ If the client disconnects mid-stream, the handler sends `abort` to the slot's pi
 
 ```sh
 TOKEN="$(openssl rand -hex 32)"   # or your WALLE_TOKEN
-PORT="${WALLE_PORT:-8080}"
+PORT="${WALLE_PORT:-6007}"
 
 curl -s "http://localhost:$PORT/health"
 
@@ -88,5 +88,5 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 | Var | Default | Notes |
 |---|---|---|
 | `WALLE_TOKEN` | — | required bearer token |
-| `WALLE_PORT` | `8080` | listen port |
+| `WALLE_PORT` | `6007` | listen port |
 | `WALLE_HTTP_QUEUE_TIMEOUT` | `60s` | max wait on a busy channel → 503 |

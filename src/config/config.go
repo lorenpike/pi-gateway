@@ -19,7 +19,7 @@
 // All defaults match the plan (┬º4):
 //
 //	WALLE_TOKEN                  required
-//	WALLE_PORT                   8080
+//	WALLE_PORT                   6007
 //	WALLE_POOL_SIZE              4
 //	WALLE_DRAIN_TIMEOUT          30s
 //	WALLE_SESSION_DIR            /home/wall-e/sessions
@@ -62,7 +62,7 @@ type TelegramConfig struct {
 
 // Default values. Exported so tests and main can reference them.
 const (
-	DefaultPort             = "8080"
+	DefaultPort             = "6007"
 	DefaultPoolSize         = 4
 	DefaultDrainTimeout     = 30 * time.Second
 	DefaultSessionDir       = "/home/wall-e/sessions"
@@ -111,14 +111,14 @@ func Load() (Config, error) {
 		errs = append(errs, "WALLE_TOKEN is required")
 	}
 
-	// --- WALLE_PORT (default 8080) --------------------------------------
+	// --- WALLE_PORT (default 6007) --------------------------------------
 	port := os.Getenv("WALLE_PORT")
 	if port == "" {
 		port = DefaultPort
 	}
 	if _, err := strconv.Atoi(port); err != nil {
 		// A port must be a plain integer for our listen address; reject
-		// "8080/tcp" etc. early with a clear message.
+		// "6007/tcp" etc. early with a clear message.
 		errs = append(errs, fmt.Sprintf("invalid WALLE_PORT %q: must be an integer", port))
 		port = DefaultPort
 	}
