@@ -1,6 +1,5 @@
 FROM golang:1.26 AS build
 # Static binary; no cgo (stdlib-only, no platform libc tie-in).
-
 COPY src/ src/
 RUN CGO_ENABLED=0 GOOS=linux cd src && go build -trimpath -o /usr/local/bin/wall-e .
 
@@ -27,6 +26,7 @@ RUN apt update && apt install -y \
     python3 \
     ripgrep \
     software-properties-common \
+    sqlite3 \
     sudo \
     tmux \
     unzip \
@@ -52,23 +52,26 @@ RUN ln -s "$(which fdfind)" /usr/local/bin/fd && \
 RUN deluser --remove-home ubuntu && \
     useradd -ms /bin/bash wall-e && \
     chown -R wall-e:wall-e /home/wall-e && \
-    mkdir -p /opt/pi && chown -R wall-e:wall-e /opt/pi && \
+    mkdir -p /opt/pi /opt/wall-e && chown -R wall-e:wall-e /opt/pi /opt/wall-e && \
     mkdir -p /home/wall-e/sessions && \
     chown -R wall-e:wall-e /home/wall-e/sessions && \
     echo "wall-e ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 COPY --from=build /usr/local/bin/wall-e /usr/local/bin/wall-e
-COPY --chown=wall-e:wall-e static/SOUL.md /home/wall-e/SOUL.md
+COPY --chown=wall-e:wall-e static/SYSTEM.md /opt/wall-e/SYSTEM.md
+COPY --chown=wall-e:wall-e static/CONTEXT.md /home/wall-e/CONTEXT.md
 
 USER wall-e
 WORKDIR /home/wall-e
 
 COPY --chown=wall-e:wall-e static/.vimrc static/.tmux.conf ./
-RUN mkdir -p .config/nvim && cp .vimrc .config/nvim/init.vim
+RUN mkdir -p .config/nvim && ln -s /home/wall-e/.vimrc .config/nvim/init.vim
 
 ENV WALLE_SESSION_DIR=/home/wall-e/sessions
 ENV PI_CODING_AGENT_DIR=/opt/pi
+
 COPY --chown=wall-e:wall-e static/APPEND_SYSTEM.md /opt/pi
+COPY --chown=wall-e:wall-e static/skills /opt/pi/skills
 
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

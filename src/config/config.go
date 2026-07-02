@@ -67,7 +67,7 @@ const (
 	DefaultDrainTimeout     = 30 * time.Second
 	DefaultSessionDir       = "/home/wall-e/sessions"
 	DefaultPiBin            = "pi"
-	DefaultSystemPrompt     = "SOUL.md"
+	DefaultSystemPrompt     = "/opt/wall-e/SYSTEM.md"
 	DefaultConfirmDefault   = true
 	DefaultLogLevel         = "info"
 	DefaultHTTPQueueTimeout = 60 * time.Second

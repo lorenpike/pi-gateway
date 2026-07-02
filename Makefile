@@ -3,19 +3,30 @@ IMAGE := wall-e
 STATIC_FILES := $(shell find static -type f)
 SRC_FILES := $(shell find src -type f)
 DOCKER_DEPS := $(STATIC_FILES) Dockerfile $(BUILD)/pi-settings.json $(SRC_FILES)
+HOME := $(or $(HOME),$(USERPROFILE))
 
 BOT := wall-e
 AUTH_FILE := /opt/pi/auth.json
 SETTINGS_FILE := /opt/pi/settings.json
 
-WALLE_PORT ?= 8080
-
 -include .env
 export
 
 # TARGETS
-.PHONY: docker
-docker: $(BUILD)/docker-stamp $(BUILD)/auth.json
+# -------------------------------------
+
+.PHONY: help # Show help message
+help:
+	@echo -e '$(BLUE)metrized-cv$(RESET) Makefile$(GRAY)'
+	@echo "List of Targets:"
+	@cat $(MAKEFILE_LIST) | grep -E '^.PHONY: [a-zA-Z0-9_-]+ .*# .*$$' \
+		| sed -E 's/.PHONY: ([^ ]+) .*# (.*)/  \1\t\2/' \
+		| expand -t 20 \
+		| sort
+
+.PHONY: docker # Build and run container
+docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
+	-@docker rm -f $(IMAGE) 2>/dev/null
 	@docker run -d \
 		--name $(IMAGE) \
 		-e WALLE_TOKEN \
@@ -24,13 +35,14 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json
 		-e WALLE_TELEGRAM_ALLOWED_CHATS \
 		-e OPENAI_API_KEY \
 		-e OPENROUTER_API_KEY \
+		-e BRAVE_API_KEY \
 		-v "./$(BUILD)/auth.json:$(AUTH_FILE)" \
 		-v "./$(BUILD)/pi-settings.json:$(SETTINGS_FILE)" \
+		-v walle--home:/home/wall-e \
 		-p $(WALLE_PORT):$(WALLE_PORT) \
 		$(IMAGE)
 
-# optionally with -race via RACE=1
-.PHONY: test
+.PHONY: test # Run tests, optionally with -race via RACE=1
 test:
 	@cd src && go vet ./... && \
 	if [ "$$RACE" = "1" ]; then \
@@ -39,16 +51,19 @@ test:
 		go test -count=1 ./...; \
 	fi
 
-# Sphinx docs (see docs/Makefile). uv provides sphinx + myst-parser + furo.
-.PHONY: docs docs-html docs-dev docs-clean
-docs docs-html:
-	@$(MAKE) -C docs html
-docs-dev:
-	@$(MAKE) -C docs dev
-docs-clean:
-	@$(MAKE) -C docs clean
+.PHONY: clean # Clean build artifacts
+clean:
+	@echo 'Cleaning up...'
+	@rm -rf $(BUILD) .gotmp/ .ruff_cache/
+	@sh -c 'find . -regex "^.*\(__pycache__\|\.py[co]\)$$ " -delete'
+	@echo 'Done!'
+
+.PHONY: debug # Show debug information
+debug:
+	@echo "HOME: $(HOME)"
 
 # RECIPES
+# -------------------------------------
 $(BUILD)/docker-stamp: $(DOCKER_DEPS)
 	@mkdir -p $(BUILD)
 	@docker build --progress=plain -t $(IMAGE) . 2>&1 | tee $@
@@ -57,6 +72,6 @@ $(BUILD)/auth.json: scripts/codex-oauth.py
 	@mkdir -p $(BUILD)
 	@uv run scripts/codex-oauth.py > $@
 
-$(BUILD)/pi-settings.json:
+$(BUILD)/pi-settings.json: $(HOME)/.pi/agent/settings.json
 	@mkdir -p $(BUILD)
 	@cat ~/.pi/agent/settings.json | jq '{ defaultProvider, defaultModel }' > $@

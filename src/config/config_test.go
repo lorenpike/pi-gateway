@@ -75,8 +75,8 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 	if cfg.RPC.Model != "" {
 		t.Errorf("RPC.Model = %q, want empty", cfg.RPC.Model)
 	}
-	if cfg.RPC.SystemPrompt != "SOUL.md" {
-		t.Errorf("RPC.SystemPrompt = %q, want SOUL.md", cfg.RPC.SystemPrompt)
+	if cfg.RPC.SystemPrompt != "/opt/wall-e/SYSTEM.md" {
+		t.Errorf("RPC.SystemPrompt = %q, want /opt/wall-e/SYSTEM.md", cfg.RPC.SystemPrompt)
 	}
 	if cfg.RPC.SessionDir != "/home/wall-e/sessions" {
 		t.Errorf("RPC.SessionDir = %q, want default", cfg.RPC.SessionDir)
@@ -154,7 +154,7 @@ func TestLoad_ExplicitOverrides(t *testing.T) {
 	if cfg.RPC.Model != "openai/gpt-5" {
 		t.Errorf("RPC.Model = %q", cfg.RPC.Model)
 	}
-	if cfg.RPC.SystemPrompt != "SOUL.md" {
+	if cfg.RPC.SystemPrompt != "/opt/wall-e/SYSTEM.md" {
 		t.Errorf("RPC.SystemPrompt = %q", cfg.RPC.SystemPrompt)
 	}
 	if cfg.RPC.UIPolicy.ConfirmedDefault {
