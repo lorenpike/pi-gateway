@@ -68,6 +68,7 @@ is still loaded by pi as appended environment context.
 | `WALLE_LOG_LEVEL` | no | `info` | `debug`/`info`/`warn`/`error` |
 | `WALLE_TELEGRAM_TOKEN` | no | — | Telegram bot token; if unset the Telegram front-end is skipped (HTTP still serves) |
 | `WALLE_TELEGRAM_ALLOWED_CHATS` | no | — | comma-separated chat-id allowlist; unset = allow all |
+| `WALLE_TELEGRAM_REGISTER_COMMANDS` | no | `true` | register Telegram command menu entries for pi RPC commands plus `/skill`, `/name`, `/session`, `/clone`, `/new`, `/compact` |
 
 ## Develop
 

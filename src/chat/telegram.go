@@ -3,8 +3,8 @@ package chat
 // telegram.go is the real TelegramAPI adapter: a thin shim over the Telegram
 // Bot API (https://api.telegram.org/bot<token>/<method>) using only net/http.
 // This keeps the gateway stdlib-only (no go-telegram-bot-api / telebot dep):
-// the four methods wall-e needs (getMe, getUpdates, sendMessage,
-// editMessageText) are trivial JSON POSTs.
+// the small set of methods wall-e needs (getMe, getUpdates, sendMessage,
+// editMessageText, setMyCommands) are trivial JSON POSTs.
 //
 // Tradeoff note (Phase 6 decision): hand-rolling preserves the module's
 // zero-third-party-dep invariant and the plan's "stdlib-only" framing, at the
@@ -101,8 +101,8 @@ func (h *httpAPI) GetMe(ctx context.Context) (User, error) {
 
 func (h *httpAPI) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Update, error) {
 	payload := map[string]any{
-		"timeout":          timeout,
-		"allowed_updates":  []string{"message"},
+		"timeout":         timeout,
+		"allowed_updates": []string{"message"},
 	}
 	if offset > 0 {
 		payload["offset"] = offset
@@ -149,4 +149,10 @@ func (h *httpAPI) EditMessageText(ctx context.Context, chatID int64, messageID i
 	return nil
 }
 
-
+func (h *httpAPI) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	payload := map[string]any{"commands": commands}
+	if err := h.call(ctx, "setMyCommands", payload, nil); err != nil {
+		return err
+	}
+	return nil
+}

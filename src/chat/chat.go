@@ -59,6 +59,15 @@ type TelegramAPI interface {
 	SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (Message, error)
 	// EditMessageText replaces the text of an existing message.
 	EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error
+	// SetMyCommands registers the bot's Telegram slash-command menu. Failures
+	// are non-fatal to the bot; Start logs and continues.
+	SetMyCommands(ctx context.Context, commands []BotCommand) error
+}
+
+// BotCommand is a Telegram bot-command menu entry.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
 }
 
 // User is a Telegram user (the bot itself, or a message author).
@@ -103,6 +112,14 @@ type Config struct {
 	// messages from these chats are processed; others are ignored. Mirrors the
 	// Discord plan's WALLE_DISCORD_ALLOWED_CHANNELS.
 	AllowedChats []int64
+	// DisableCommandRegistration controls whether Start skips Telegram
+	// setMyCommands. Command parsing still uses CommandProvider when disabled.
+	// Config.Load owns env parsing and main sets this from
+	// WALLE_TELEGRAM_REGISTER_COMMANDS.
+	DisableCommandRegistration bool
+	// CommandProvider discovers pi RPC commands (extensions, prompt templates,
+	// and skills) for Telegram aliases. It may be nil.
+	CommandProvider func(context.Context) ([]rpc.Command, error)
 }
 
 // Bot is the Telegram front-end. It is a Frontend: Start launches the
@@ -123,7 +140,12 @@ type Bot struct {
 	// 0 = disabled (tests).
 	idleTimeout time.Duration
 
-	botID int64
+	botID   int64
+	botName string
+
+	registerCommands bool
+	commandProvider  func(context.Context) ([]rpc.Command, error)
+	commands         *telegramCommandRegistry
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -171,12 +193,15 @@ func NewTelegram(cfg Config, p *pool.Pool, api TelegramAPI) (*Bot, error) {
 		allowed[id] = true
 	}
 	return &Bot{
-		api:          api,
-		pool:         p,
-		allowed:      allowed,
-		editInterval: 1 * time.Second,
-		idleTimeout:  5 * time.Minute,
-		turns:        make(map[int64]*turnState),
+		api:              api,
+		pool:             p,
+		allowed:          allowed,
+		editInterval:     1 * time.Second,
+		idleTimeout:      5 * time.Minute,
+		turns:            make(map[int64]*turnState),
+		registerCommands: !cfg.DisableCommandRegistration,
+		commandProvider:  cfg.CommandProvider,
+		commands:         newTelegramCommandRegistry(nil),
 	}, nil
 }
 
@@ -190,12 +215,36 @@ func (b *Bot) Start(ctx context.Context) error {
 		return fmt.Errorf("chat: telegram getMe: %w", err)
 	}
 	b.botID = me.ID
+	b.botName = me.UserName
 	log.Printf("telegram: connected as @%s (id=%d)", me.UserName, me.ID)
+
+	b.initCommands(ctx)
 
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	b.pollDone = make(chan struct{})
 	go b.pollLoop()
 	return nil
+}
+
+func (b *Bot) initCommands(ctx context.Context) {
+	if b.commandProvider != nil {
+		commands, err := b.commandProvider(ctx)
+		if err != nil {
+			log.Printf("telegram: command discovery failed: %v", err)
+		} else {
+			b.commands = newTelegramCommandRegistry(commands)
+		}
+	}
+	botCommands := b.commands.botCommands()
+	if !b.registerCommands {
+		log.Printf("telegram: command registration disabled (%d aliases available)", len(b.commands.all))
+		return
+	}
+	if err := b.api.SetMyCommands(ctx, botCommands); err != nil {
+		log.Printf("telegram: setMyCommands failed: %v (continuing)", err)
+		return
+	}
+	log.Printf("telegram: registered %d command aliases (%d total aliases)", len(botCommands), len(b.commands.all))
 }
 
 // pollLoop runs the getUpdates long-poll until b.ctx is cancelled. Each received
@@ -283,6 +332,19 @@ func (b *Bot) handleMessage(msg Message) {
 	if text == "" {
 		return // v1: only text messages
 	}
+	cmdName, cmdArgs, isSlash, addressedToOtherBot := parseTelegramCommandText(text, b.botName)
+	if addressedToOtherBot {
+		return
+	}
+	if isSlash {
+		if handled, rewritten := b.handleSlashCommand(chatID, cmdName, cmdArgs); handled {
+			return
+		} else if rewritten != "" {
+			text = rewritten
+		} else {
+			text, _, _ = rewriteTelegramCommandText(text, b.botName, b.commands)
+		}
+	}
 
 	for {
 		b.turnsMu.Lock()
@@ -303,17 +365,132 @@ func (b *Bot) handleMessage(msg Message) {
 
 		// Active turn → steer. If the turn turned out stale (finished between
 		// our map check and here), loop and start a fresh turn.
-		if b.steer(chatID, text, ts) {
+		if b.steer(chatID, text, isSlash, ts) {
 			return
 		}
 	}
+}
+
+func (b *Bot) handleSlashCommand(chatID int64, cmdName, args string) (handled bool, rewritten string) {
+	tc, ok := b.commands.lookup(cmdName)
+	if !ok || tc.Source != "gateway" {
+		return false, ""
+	}
+	args = strings.TrimSpace(args)
+	if cmdName == "skill" {
+		if args == "" {
+			_, _ = b.api.SendMessage(b.ctx, chatID, b.commands.skillListText(), 0)
+			return true, ""
+		}
+		name, rest, _ := strings.Cut(args, " ")
+		skill, ok := b.commands.lookupSkill(name)
+		if !ok {
+			_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ unknown skill: "+name+"\n\n"+b.commands.skillListText(), 0)
+			return true, ""
+		}
+		if strings.TrimSpace(rest) == "" {
+			return false, "/" + skill.PiName
+		}
+		return false, "/" + skill.PiName + " " + strings.TrimSpace(rest)
+	}
+
+	if b.chatHasActiveTurn(chatID) {
+		_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ /"+cmdName+" is unavailable while pi is responding. Try again after this turn finishes.", 0)
+		return true, ""
+	}
+	b.handleGatewayCommand(chatID, cmdName, args)
+	return true, ""
+}
+
+func (b *Bot) chatHasActiveTurn(chatID int64) bool {
+	b.turnsMu.Lock()
+	defer b.turnsMu.Unlock()
+	return b.turns[chatID] != nil
+}
+
+func (b *Bot) handleGatewayCommand(chatID int64, cmdName, args string) {
+	chID := pool.ChannelID(session.NewChannelID("telegram", strconv.FormatInt(chatID, 10)))
+	slot, err := b.pool.Acquire(b.ctx, chID)
+	if err != nil {
+		log.Printf("telegram: /%s acquire chat %d: %v", cmdName, chatID, err)
+		_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ no agent available: "+err.Error(), 0)
+		return
+	}
+	defer b.pool.Release(chID)
+
+	client := slot.Client()
+	switch cmdName {
+	case "name":
+		resp, err := client.SetSessionName(b.ctx, strings.TrimSpace(args))
+		if err != nil || !resp.Success {
+			b.sendCommandError(chatID, "name", resp, err)
+			return
+		}
+		if strings.TrimSpace(args) == "" {
+			_, _ = b.api.SendMessage(b.ctx, chatID, "Session name cleared.", 0)
+		} else {
+			_, _ = b.api.SendMessage(b.ctx, chatID, "Session name set to: "+strings.TrimSpace(args), 0)
+		}
+	case "session":
+		st, err := client.GetState(b.ctx)
+		if err != nil {
+			b.sendCommandError(chatID, "session", rpc.Response{}, err)
+			return
+		}
+		text := fmt.Sprintf("Session\nID: %s\nName: %s\nMessages: %d\nStreaming: %v", emptyDash(st.SessionID), emptyDash(st.SessionName), st.MessageCount, st.IsStreaming)
+		_, _ = b.api.SendMessage(b.ctx, chatID, text, 0)
+	case "new":
+		resp, st, err := client.NewSession(b.ctx)
+		if err != nil || !resp.Success {
+			b.sendCommandError(chatID, "new", resp, err)
+			return
+		}
+		if st.SessionFile != "" {
+			_ = b.pool.ResyncFromState(chID, st.SessionFile)
+		}
+		_, _ = b.api.SendMessage(b.ctx, chatID, "Started a new pi session.", 0)
+	case "clone":
+		resp, st, err := client.Clone(b.ctx)
+		if err != nil || !resp.Success {
+			b.sendCommandError(chatID, "clone", resp, err)
+			return
+		}
+		if st.SessionFile != "" {
+			_ = b.pool.ResyncFromState(chID, st.SessionFile)
+		}
+		_, _ = b.api.SendMessage(b.ctx, chatID, "Cloned this pi session branch.", 0)
+	case "compact":
+		resp, err := client.Compact(b.ctx, strings.TrimSpace(args))
+		if err != nil || !resp.Success {
+			b.sendCommandError(chatID, "compact", resp, err)
+			return
+		}
+		_, _ = b.api.SendMessage(b.ctx, chatID, "Compacted this pi session.", 0)
+	}
+}
+
+func (b *Bot) sendCommandError(chatID int64, name string, resp rpc.Response, err error) {
+	msg := "⚠️ /" + name + " failed"
+	if err != nil {
+		msg += ": " + err.Error()
+	} else if resp.Error != "" {
+		msg += ": " + resp.Error
+	}
+	_, _ = b.api.SendMessage(b.ctx, chatID, msg, 0)
+}
+
+func emptyDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
 }
 
 // steer forwards a mid-stream message to an active turn's slot as a `steer`
 // command (NOT a new Acquire). Returns true if handled (steered or dropped on
 // error/shutdown); false if the turn turned out stale and the caller should
 // retry as a fresh turn.
-func (b *Bot) steer(chatID int64, text string, ts *turnState) (handled bool) {
+func (b *Bot) steer(chatID int64, text string, isSlash bool, ts *turnState) (handled bool) {
 	select {
 	case <-ts.slotReady:
 	case <-b.ctx.Done():
@@ -333,7 +510,15 @@ func (b *Bot) steer(chatID int64, text string, ts *turnState) (handled bool) {
 		log.Printf("telegram: steer skipped for chat %d (acquire failed earlier)", chatID)
 		return true
 	}
-	if _, err := ts.slot.Client().Steer(b.ctx, text); err != nil {
+	var err error
+	if isSlash {
+		// Pi RPC docs: extension slash commands must be sent via prompt, not
+		// steer. streamingBehavior=steer keeps the desired mid-stream UX.
+		_, err = ts.slot.Client().Prompt(b.ctx, text, true)
+	} else {
+		_, err = ts.slot.Client().Steer(b.ctx, text)
+	}
+	if err != nil {
 		log.Printf("telegram: steer chat %d: %v", chatID, err)
 	}
 	return true

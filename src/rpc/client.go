@@ -613,7 +613,7 @@ func (c *Client) GetSessionStats(ctx context.Context) (json.RawMessage, error) {
 	return resp.Data, nil
 }
 
-// GetCommands sends `get_commands`.
+// GetCommands sends `get_commands` and returns the raw data payload.
 func (c *Client) GetCommands(ctx context.Context) (json.RawMessage, error) {
 	resp, err := c.send(ctx, map[string]any{"type": "get_commands"})
 	if err != nil {
@@ -623,6 +623,28 @@ func (c *Client) GetCommands(ctx context.Context) (json.RawMessage, error) {
 		return nil, fmt.Errorf("rpc: get_commands failed: %s", resp.Error)
 	}
 	return resp.Data, nil
+}
+
+// ListCommands sends `get_commands` and decodes pi's RPC-mode slash commands.
+// The result contains extension commands, prompt templates, and skills, but not
+// interactive/TUI-only built-ins like /settings or /model.
+func (c *Client) ListCommands(ctx context.Context) ([]Command, error) {
+	data, err := c.GetCommands(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Commands []Command `json:"commands"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("rpc: decode commands: %w", err)
+	}
+	return out.Commands, nil
+}
+
+// SetSessionName sends `set_session_name`.
+func (c *Client) SetSessionName(ctx context.Context, name string) (Response, error) {
+	return c.send(ctx, map[string]any{"type": "set_session_name", "name": name})
 }
 
 // SetModel sends `set_model`.

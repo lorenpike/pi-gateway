@@ -43,7 +43,7 @@ type ImageContent struct {
 type Response struct {
 	ID      string          `json:"id,omitempty"`
 	Command string          `json:"command"`
-	Success bool           `json:"success"`
+	Success bool            `json:"success"`
 	Error   string          `json:"error,omitempty"`
 	Data    json.RawMessage `json:"data,omitempty"`
 }
@@ -58,10 +58,21 @@ type State struct {
 	FollowUpMode          string          `json:"followUpMode"`
 	SessionFile           string          `json:"sessionFile"`
 	SessionID             string          `json:"sessionId"`
-	SessionName            string          `json:"sessionName,omitempty"`
+	SessionName           string          `json:"sessionName,omitempty"`
 	AutoCompactionEnabled bool            `json:"autoCompactionEnabled"`
 	MessageCount          int             `json:"messageCount"`
 	PendingMessageCount   int             `json:"pendingMessageCount"`
+}
+
+// Command is one slash command reported by RPC get_commands. Pi includes
+// extension commands, prompt templates, and skills; it deliberately excludes
+// interactive/TUI-only built-ins like /settings and /model.
+type Command struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Source      string `json:"source"`
+	Location    string `json:"location,omitempty"`
+	Path        string `json:"path,omitempty"`
 }
 
 // Event is a single non-response message streamed by pi (agent_start,
@@ -92,7 +103,7 @@ const (
 	EventMessageUpdate       = "message_update"
 	EventMessageEnd          = "message_end"
 	EventToolExecutionStart  = "tool_execution_start"
-	EventToolExecutionUpdate  = "tool_execution_update"
+	EventToolExecutionUpdate = "tool_execution_update"
 	EventToolExecutionEnd    = "tool_execution_end"
 	EventQueueUpdate         = "queue_update"
 	EventCompactionStart     = "compaction_start"

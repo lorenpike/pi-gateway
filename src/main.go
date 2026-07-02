@@ -26,6 +26,7 @@ import (
 	"wall-e/config"
 	"wall-e/httpapi"
 	"wall-e/pool"
+	"wall-e/rpc"
 	"wall-e/session"
 )
 
@@ -44,6 +45,36 @@ func main() {
 
 	if err := run(ctx, cfg); err != nil {
 		log.Fatalf("wall-e: %v", err)
+	}
+}
+
+// telegramCommandProvider discovers pi RPC slash commands for Telegram by
+// launching a short-lived no-session RPC process. It deliberately does not use
+// the shared pool so command registration cannot consume a worker slot or bind
+// to a user/channel session.
+func telegramCommandProvider(base rpc.Config) func(context.Context) ([]rpc.Command, error) {
+	return func(ctx context.Context) ([]rpc.Command, error) {
+		discoverCfg := base
+		discoverCfg.SessionDir = ""
+		discoverCfg.NoSession = true
+		if discoverCfg.RequestTimeout == 0 {
+			discoverCfg.RequestTimeout = 30 * time.Second
+		}
+		client, err := rpc.New(discoverCfg)
+		if err != nil {
+			return nil, err
+		}
+		drainDone := make(chan struct{})
+		go func() {
+			defer close(drainDone)
+			for range client.Events() {
+			}
+		}()
+		defer func() {
+			_ = client.Close()
+			<-drainDone
+		}()
+		return client.ListCommands(ctx)
 	}
 }
 
@@ -115,8 +146,10 @@ func run(ctx context.Context, cfg config.Config) error {
 	var frontends []chat.Frontend
 	if cfg.Chat.Telegram.Token != "" {
 		tb, err := chat.NewTelegram(chat.Config{
-			Token:        cfg.Chat.Telegram.Token,
-			AllowedChats: cfg.Chat.Telegram.AllowedChats,
+			Token:                      cfg.Chat.Telegram.Token,
+			AllowedChats:               cfg.Chat.Telegram.AllowedChats,
+			DisableCommandRegistration: !cfg.Chat.Telegram.RegisterCommands,
+			CommandProvider:            telegramCommandProvider(cfg.RPC),
 		}, p, nil)
 		if err != nil {
 			log.Printf("telegram: disabled: %v", err)

@@ -13,6 +13,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -38,11 +39,13 @@ type editMsg struct {
 }
 
 type fakeTelegramAPI struct {
-	mu      sync.Mutex
-	me      User
-	sends   []sentMsg
-	edits   []editMsg
-	updates chan Update // for GetUpdates (poll-loop test)
+	mu             sync.Mutex
+	me             User
+	sends          []sentMsg
+	edits          []editMsg
+	commands       []BotCommand
+	setCommandsErr error
+	updates        chan Update // for GetUpdates (poll-loop test)
 }
 
 func newFakeTelegramAPI(botID int64) *fakeTelegramAPI {
@@ -82,6 +85,13 @@ func (a *fakeTelegramAPI) EditMessageText(ctx context.Context, chatID int64, mes
 	return nil
 }
 
+func (a *fakeTelegramAPI) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.commands = append([]BotCommand(nil), commands...)
+	return a.setCommandsErr
+}
+
 func (a *fakeTelegramAPI) sendCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -117,6 +127,14 @@ func (a *fakeTelegramAPI) sendsFor(chatID int64) []sentMsg {
 			out = append(out, s)
 		}
 	}
+	return out
+}
+
+func (a *fakeTelegramAPI) registeredCommands() []BotCommand {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]BotCommand, len(a.commands))
+	copy(out, a.commands)
 	return out
 }
 
@@ -410,7 +428,7 @@ func TestTelegram_PollLoop_DispatchesAndStops(t *testing.T) {
 	// Inject one incoming message via the poll loop's update channel.
 	api.updates <- Update{
 		UpdateID: 1,
-		Message: &Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "hello"},
+		Message:  &Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "hello"},
 	}
 
 	// Wait for the bot to send a reply (the turn finalizes the message).
@@ -427,5 +445,189 @@ func TestTelegram_PollLoop_DispatchesAndStops(t *testing.T) {
 	defer stopCancel()
 	if err := bot.Stop(stopCtx); err != nil {
 		t.Errorf("Stop: %v", err)
+	}
+}
+
+func TestTelegram_StartRegistersPiCommands(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	p, _ := testPool(t, makeScriptedHandler(nil, nil))
+	provider := func(context.Context) ([]rpc.Command, error) {
+		return []rpc.Command{
+			{Name: "fix-tests", Description: "Fix failing tests", Source: "prompt"},
+			{Name: "skill:brave-search", Description: "Web search", Source: "skill"},
+			{Name: "hello", Description: "Say hello", Source: "extension"},
+		}, nil
+	}
+	bot, err := NewTelegram(Config{Token: "fake", CommandProvider: provider}, p, api)
+	if err != nil {
+		t.Fatalf("NewTelegram: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := bot.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer bot.Stop(context.Background())
+
+	cmds := api.registeredCommands()
+	want := map[string]string{"skill": "List skills or run /skill <name> [args]", "name": "Set or clear this pi session name", "session": "Show current pi session info", "clone": "Clone this pi session branch", "new": "Start a new pi session", "compact": "Compact this pi session context", "fix_tests": "Fix failing tests", "hello": "Say hello"}
+	if len(cmds) != len(want) {
+		t.Fatalf("registered commands = %v, want %d", cmds, len(want))
+	}
+	for _, c := range cmds {
+		if want[c.Command] != c.Description {
+			t.Errorf("registered command %+v not in expected map %v", c, want)
+		}
+	}
+}
+
+func TestTelegram_SetMyCommandsFailureNonFatal(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	api.setCommandsErr = errors.New("telegram down")
+	p, _ := testPool(t, makeScriptedHandler(nil, nil))
+	provider := func(context.Context) ([]rpc.Command, error) {
+		return []rpc.Command{{Name: "fix-tests", Description: "Fix failing tests", Source: "prompt"}}, nil
+	}
+	bot, err := NewTelegram(Config{Token: "fake", CommandProvider: provider}, p, api)
+	if err != nil {
+		t.Fatalf("NewTelegram: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := bot.Start(ctx); err != nil {
+		t.Fatalf("Start should ignore setMyCommands failure: %v", err)
+	}
+	_ = bot.Stop(context.Background())
+	if got := api.registeredCommands(); len(got) != 7 || got[0].Command != "skill" || got[6].Command != "fix_tests" {
+		t.Errorf("registeredCommands = %v, want native commands plus fix_tests recorded", got)
+	}
+}
+
+func TestTelegram_GatewayNameCommand(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	p, ff := testPool(t, makeScriptedHandler(nil, nil))
+	bot := newTestBot(t, p, api)
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/name Demo Session"})
+
+	fake := ff.first()
+	if fake == nil || !fake.contains(`"type":"set_session_name"`) || !fake.contains("Demo Session") {
+		t.Fatalf("fake pi did not receive set_session_name; got %v", fake)
+	}
+	if got := api.lastSendText(); got != "Session name set to: Demo Session" {
+		t.Fatalf("ack = %q, want session-name ack", got)
+	}
+}
+
+func TestTelegram_CommandAliasRewritesToPiCommand(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	script := []scriptedEvent{{kind: "agent_end", delay: 0}}
+	p, ff := testPool(t, makeScriptedHandler(script, nil))
+	bot := newTestBot(t, p, api)
+	bot.commands = newTelegramCommandRegistry([]rpc.Command{{Name: "fix-tests", Description: "Fix", Source: "prompt"}})
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/fix_tests now"})
+
+	fake := ff.first()
+	if fake == nil || !fake.contains("/fix-tests now") {
+		t.Fatalf("fake pi did not receive rewritten command; got %v", fake)
+	}
+}
+
+func TestTelegram_SkillCommandListsAndRewritesToPiSkill(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	script := []scriptedEvent{{kind: "agent_end", delay: 0}}
+	p, ff := testPool(t, makeScriptedHandler(script, nil))
+	bot := newTestBot(t, p, api)
+	bot.commands = newTelegramCommandRegistry([]rpc.Command{{Name: "skill:brave-search", Description: "Search", Source: "skill"}})
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/skill"})
+	if got := api.lastSendText(); !strings.Contains(got, "/skill brave-search") {
+		t.Fatalf("/skill list = %q, want brave-search", got)
+	}
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/skill brave-search pi docs"})
+
+	fake := ff.first()
+	if fake == nil || !fake.contains("/skill:brave-search pi docs") {
+		t.Fatalf("fake pi did not receive rewritten skill command; got %v", fake)
+	}
+}
+
+func TestTelegram_GroupCommandMention(t *testing.T) {
+	reg := newTelegramCommandRegistry([]rpc.Command{{Name: "fix-tests", Description: "Fix", Source: "prompt"}})
+	got, isSlash, other := rewriteTelegramCommandText("/fix_tests@wall_e_test_bot now", "wall_e_test_bot", reg)
+	if got != "/fix-tests now" || !isSlash || other {
+		t.Fatalf("own mention rewrite = (%q,%v,%v), want /fix-tests now,true,false", got, isSlash, other)
+	}
+	_, isSlash, other = rewriteTelegramCommandText("/fix_tests@other_bot now", "wall_e_test_bot", reg)
+	if !isSlash || !other {
+		t.Fatalf("other bot mention = isSlash %v other %v, want true true", isSlash, other)
+	}
+}
+
+func TestTelegram_ActiveSlashCommandUsesPromptStreamingBehaviorSteer(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	streamDone := make(chan struct{})
+	p, ff := testPool(t, makeScriptedHandler(nil, streamDone))
+	bot := newTestBot(t, p, api)
+	bot.commands = newTelegramCommandRegistry([]rpc.Command{{Name: "fix-tests", Description: "Fix", Source: "prompt"}})
+
+	aDone := make(chan struct{})
+	go func() {
+		bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "first"})
+		close(aDone)
+	}()
+	fake := ff.waitForFirst(2 * time.Second)
+	if fake == nil || !fake.waitForCommand(`"type":"prompt"`, 2*time.Second) {
+		t.Fatal("first prompt not received")
+	}
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/fix_tests now"})
+
+	if got := fake.count(`"type":"prompt"`); got != 2 {
+		t.Fatalf("prompt count = %d, want 2 (second slash command must use prompt)", got)
+	}
+	if fake.contains(`"type":"steer"`) {
+		t.Fatal("active slash command used steer; want prompt with streamingBehavior")
+	}
+	if !fake.contains(`"streamingBehavior":"steer"`) || !fake.contains("/fix-tests now") {
+		t.Fatalf("active slash command did not carry streamingBehavior=steer and rewritten text; got %v", fake.Got())
+	}
+
+	close(streamDone)
+	select {
+	case <-aDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first turn did not finish")
+	}
+}
+
+func TestTelegramCommandRegistry_SanitizeCollideAndCap(t *testing.T) {
+	cmds := []rpc.Command{
+		{Name: "fix-tests", Source: "prompt"},
+		{Name: "fix_tests", Source: "extension"},
+		{Name: "this-command-name-is-way-more-than-thirty-two-characters", Description: strings.Repeat("d", 300), Source: "prompt"},
+	}
+	for i := 0; i < 110; i++ {
+		cmds = append(cmds, rpc.Command{Name: "cmd" + string(rune('a'+(i%26))) + strings.Repeat("x", i/26), Source: "prompt"})
+	}
+	reg := newTelegramCommandRegistry(cmds)
+	if _, ok := reg.lookup("fix_tests"); !ok {
+		t.Fatal("missing fix_tests alias")
+	}
+	if tc, ok := reg.lookup("fix_tests_2"); !ok || tc.PiName != "fix_tests" {
+		t.Fatalf("collision alias = %+v ok=%v, want fix_tests_2 -> fix_tests", tc, ok)
+	}
+	for _, c := range reg.all {
+		if len(c.TelegramName) > telegramCommandMaxLen {
+			t.Fatalf("alias %q len=%d > %d", c.TelegramName, len(c.TelegramName), telegramCommandMaxLen)
+		}
+		if len([]rune(c.Description)) > telegramCommandDescriptionMax {
+			t.Fatalf("description len > %d", telegramCommandDescriptionMax)
+		}
+	}
+	if len(reg.botCommands()) != telegramCommandRegisterMax {
+		t.Fatalf("registered command count = %d, want %d", len(reg.botCommands()), telegramCommandRegisterMax)
 	}
 }

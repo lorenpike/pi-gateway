@@ -33,7 +33,7 @@ type fakePI struct {
 	stdinWriter  *io.PipeWriter // Client writes commands here
 	stdoutReader *io.PipeReader // Client reads events here
 
-	fakeStdinR  *bufio.Reader // fake reads commands here
+	fakeStdinR  *bufio.Reader  // fake reads commands here
 	fakeStdoutW *io.PipeWriter // fake writes events here
 
 	gotMu sync.Mutex
@@ -174,8 +174,8 @@ func isClosedPipeErr(err error) bool {
 // fakeFactory builds rpc.Clients over fresh fake pis and records each fake so
 // tests can assert on the commands each slot's process received.
 type fakeFactory struct {
-	mu     sync.Mutex
-	fakes  []*fakePI // indexed by spawn sequence
+	mu    sync.Mutex
+	fakes []*fakePI // indexed by spawn sequence
 }
 
 func newFakeFactory() *fakeFactory { return &fakeFactory{} }
@@ -233,8 +233,16 @@ func makeScriptedHandler(script []scriptedEvent, streamDone chan struct{}) func(
 		case "get_state":
 			f.writeJSON(map[string]any{
 				"type": "response", "command": "get_state", "success": true, "id": id,
-				"data": map[string]any{"sessionFile": "/tmp/test.jsonl", "isStreaming": false},
+				"data": map[string]any{"sessionFile": "/tmp/test.jsonl", "sessionId": "test", "sessionName": "", "messageCount": 3, "isStreaming": false},
 			})
+		case "set_session_name":
+			f.writeResp(id, "set_session_name", true)
+		case "new_session":
+			f.writeResp(id, "new_session", true)
+		case "clone":
+			f.writeResp(id, "clone", true)
+		case "compact":
+			f.writeResp(id, "compact", true)
 		case "prompt":
 			f.writeResp(id, "prompt", true)
 			f.writeJSON(map[string]any{"type": "agent_start"})

@@ -17,7 +17,7 @@
 //     then reuse it (same session, no drain, no switch_session).
 //  2. Otherwise (no slot for `channel`):
 //     a. If under capacity (< Size live slots), spawn a fresh pi process,
-//        switch_session to the channel's current file, bind, mark busy.
+//     switch_session to the channel's current file, bind, mark busy.
 //     b. If at capacity, pick the LRU idle (not busy) slot, drain it if still
 //     streaming (wait for agent_end up to DrainTimeout, then abort), then
 //     switch_session to the new channel's file and rebind.
@@ -80,12 +80,12 @@ type Pool struct {
 	newClient func(rpc.Config) (*rpc.Client, error)
 	drainTo   time.Duration
 
-	mu          sync.Mutex
-	slots       map[ChannelID]*slot
-	idleSignal  chan struct{} // closed (then recreated) when any slot goes busy→idle
-	sem         chan struct{} // bounds live process count to Size
-	closed      atomic.Bool
-	doneCh      chan struct{}
+	mu         sync.Mutex
+	slots      map[ChannelID]*slot
+	idleSignal chan struct{} // closed (then recreated) when any slot goes busy→idle
+	sem        chan struct{} // bounds live process count to Size
+	closed     atomic.Bool
+	doneCh     chan struct{}
 }
 
 // Slot is a handle to an acquired worker. The caller drives the pi process via
@@ -100,11 +100,11 @@ type Slot struct {
 // slot is an internal worker: a live pi process (rpc.Client) plus its current
 // channel binding and busy/streaming state.
 type slot struct {
-	client *rpc.Client
+	client  *rpc.Client
 	channel ChannelID
 
-	mu     sync.Mutex
-	busy   bool
+	mu       sync.Mutex
+	busy     bool
 	lastUsed time.Time
 
 	streaming    atomic.Bool
@@ -131,10 +131,10 @@ func New(cfg Config) (*Pool, error) {
 		nc = rpc.New
 	}
 	p := &Pool{
-		cfg:       cfg,
-		newClient: nc,
-		drainTo:   drain,
-		slots:     make(map[ChannelID]*slot),
+		cfg:        cfg,
+		newClient:  nc,
+		drainTo:    drain,
+		slots:      make(map[ChannelID]*slot),
 		idleSignal: make(chan struct{}),
 		sem:        make(chan struct{}, size),
 		doneCh:     make(chan struct{}),
@@ -467,6 +467,12 @@ func (p *Pool) broadcastIdle() {
 	close(p.idleSignal)
 	p.idleSignal = make(chan struct{})
 	p.mu.Unlock()
+}
+
+// ResyncFromState updates the session manager's current file for channel after
+// a session-mutating RPC command such as new_session or clone.
+func (p *Pool) ResyncFromState(channel ChannelID, sessionFile string) error {
+	return p.cfg.Sessions.ResyncFromState(channel, sessionFile)
 }
 
 // Release returns the slot bound to `channel` to the pool. The process stays

@@ -27,6 +27,7 @@ var allWalleEnv = []string{
 	"WALLE_LOG_LEVEL",
 	"WALLE_TELEGRAM_TOKEN",
 	"WALLE_TELEGRAM_ALLOWED_CHATS",
+	"WALLE_TELEGRAM_REGISTER_COMMANDS",
 }
 
 // clearWalleEnv unsets every WALLE_* var Load reads, for a known-clean start.
@@ -375,6 +376,9 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 		if cfg.Chat.Telegram.AllowedChats != nil {
 			t.Errorf("Telegram.AllowedChats = %v, want nil", cfg.Chat.Telegram.AllowedChats)
 		}
+		if !cfg.Chat.Telegram.RegisterCommands {
+			t.Errorf("Telegram.RegisterCommands = false, want true")
+		}
 	})
 
 	t.Run("token + allowlist parsed", func(t *testing.T) {
@@ -382,6 +386,7 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 		t.Setenv("WALLE_TOKEN", "x")
 		t.Setenv("WALLE_TELEGRAM_TOKEN", "123:ABC")
 		t.Setenv("WALLE_TELEGRAM_ALLOWED_CHATS", " 42, -7 , 999")
+		t.Setenv("WALLE_TELEGRAM_REGISTER_COMMANDS", "false")
 
 		cfg, err := Load()
 		if err != nil {
@@ -398,6 +403,9 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 			if cfg.Chat.Telegram.AllowedChats[i] != want[i] {
 				t.Errorf("AllowedChats[%d] = %d, want %d", i, cfg.Chat.Telegram.AllowedChats[i], want[i])
 			}
+		}
+		if cfg.Chat.Telegram.RegisterCommands {
+			t.Errorf("RegisterCommands = true, want false")
 		}
 	})
 
@@ -426,6 +434,20 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 		}
 		if !contains(err.Error(), "WALLE_TELEGRAM_ALLOWED_CHATS") {
 			t.Errorf("error %q does not mention WALLE_TELEGRAM_ALLOWED_CHATS", err.Error())
+		}
+	})
+
+	t.Run("bad register commands bool rejected", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+		t.Setenv("WALLE_TELEGRAM_REGISTER_COMMANDS", "maybe")
+
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error for bad register commands bool, got nil")
+		}
+		if !contains(err.Error(), "WALLE_TELEGRAM_REGISTER_COMMANDS") {
+			t.Errorf("error %q does not mention WALLE_TELEGRAM_REGISTER_COMMANDS", err.Error())
 		}
 	})
 }

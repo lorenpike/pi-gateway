@@ -31,6 +31,7 @@
 //	WALLE_HTTP_QUEUE_TIMEOUT     60s
 //	WALLE_SITE                   /opt/wall-e/www
 //	WALLE_SESSION_EXPORT_TIMEOUT 30s
+//	WALLE_TELEGRAM_REGISTER_COMMANDS true
 package config
 
 import (
@@ -60,6 +61,10 @@ type TelegramConfig struct {
 	Token string
 	// AllowedChats is the optional chat-id allowlist (empty = allow all).
 	AllowedChats []int64
+	// RegisterCommands controls whether the Telegram front-end calls
+	// setMyCommands for pi slash-command aliases. Command parsing still works
+	// when false. Defaults to true.
+	RegisterCommands bool
 }
 
 // Default values. Exported so tests and main can reference them.
@@ -228,6 +233,11 @@ func Load() (Config, error) {
 		errs = append(errs, err.Error())
 	}
 	cfg.Chat.Telegram.AllowedChats = allowedChats
+	telegramRegisterCommands, err := parseBoolEnv("WALLE_TELEGRAM_REGISTER_COMMANDS", true)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	cfg.Chat.Telegram.RegisterCommands = telegramRegisterCommands
 
 	if len(errs) > 0 {
 		return cfg, fmt.Errorf("config: %s", strings.Join(errs, "; "))

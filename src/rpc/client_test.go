@@ -87,7 +87,7 @@ func defaultHandler(streaming *bool, sessionFile string) func(f *fakePI, cmd map
 		case "get_state":
 			data := map[string]any{
 				"sessionFile": sessionFile,
-				"isStreaming":  false,
+				"isStreaming": false,
 			}
 			if streaming != nil {
 				data["isStreaming"] = *streaming
@@ -105,6 +105,8 @@ func defaultHandler(streaming *bool, sessionFile string) func(f *fakePI, cmd map
 			writeResp("compact", true, map[string]any{})
 		case "bash":
 			writeResp("bash", true, map[string]any{"output": "", "exitCode": 0})
+		case "set_session_name":
+			writeResp("set_session_name", true, map[string]any{})
 		case "set_model":
 			writeResp("set_model", true, map[string]any{})
 		default:
@@ -317,7 +319,7 @@ func TestClient_GetState(t *testing.T) {
 				"data": map[string]any{
 					"sessionFile":           sf,
 					"sessionId":             "abc",
-					"isStreaming":            false,
+					"isStreaming":           false,
 					"thinkingLevel":         "medium",
 					"autoCompactionEnabled": true,
 					"messageCount":          5,
@@ -346,6 +348,40 @@ func TestClient_GetState(t *testing.T) {
 	}
 	if got := c.SessionFile(); got != sf {
 		t.Errorf("cached sessionFile = %q, want %q", got, sf)
+	}
+}
+
+func TestClient_ListCommands(t *testing.T) {
+	restore := setCurrentTest(t)
+	defer restore()
+
+	c, _ := newClientWithFake(t, func(f *fakePI, cmd map[string]any) {
+		id, _ := cmd["id"].(string)
+		if cmd["type"] != "get_commands" {
+			defaultHandler(nil, "")(f, cmd)
+			return
+		}
+		f.writeJSON(t, map[string]any{
+			"type": "response", "command": "get_commands", "success": true, "id": id,
+			"data": map[string]any{"commands": []any{
+				map[string]any{"name": "fix-tests", "description": "Fix failing tests", "source": "prompt", "location": "project", "path": "/p/.pi/prompts/fix-tests.md"},
+				map[string]any{"name": "skill:brave-search", "description": "Search", "source": "skill"},
+			}},
+		})
+	})
+
+	cmds, err := c.ListCommands(testContext(t))
+	if err != nil {
+		t.Fatalf("ListCommands: %v", err)
+	}
+	if len(cmds) != 2 {
+		t.Fatalf("commands len = %d, want 2", len(cmds))
+	}
+	if cmds[0].Name != "fix-tests" || cmds[0].Source != "prompt" || cmds[0].Location != "project" {
+		t.Errorf("first command = %+v", cmds[0])
+	}
+	if cmds[1].Name != "skill:brave-search" || cmds[1].Source != "skill" {
+		t.Errorf("second command = %+v", cmds[1])
 	}
 }
 
