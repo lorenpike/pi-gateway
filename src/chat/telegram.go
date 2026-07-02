@@ -121,8 +121,9 @@ func (h *httpAPI) GetUpdates(ctx context.Context, offset int64, timeout int) ([]
 
 func (h *httpAPI) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (Message, error) {
 	payload := map[string]any{
-		"chat_id": chatID,
-		"text":    text,
+		"chat_id":    chatID,
+		"text":       renderTelegramMarkdown(text),
+		"parse_mode": telegramParseModeHTML,
 	}
 	if replyTo > 0 {
 		payload["reply_to_message_id"] = replyTo
@@ -138,7 +139,8 @@ func (h *httpAPI) EditMessageText(ctx context.Context, chatID int64, messageID i
 	payload := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
-		"text":       text,
+		"text":       renderTelegramMarkdown(text),
+		"parse_mode": telegramParseModeHTML,
 	}
 	// editMessageText returns the edited Message in result; we ignore it. A
 	// "message is not modified" error is surfaced to the caller (logged by the

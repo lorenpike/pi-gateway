@@ -63,7 +63,8 @@ For each incoming text message:
 1. **Acquire** a slot for the chat (one live `pi` per Telegram chat).
 2. On the **first** assistant text delta, send an initial message (so the user sees the reply start immediately).
 3. As further deltas arrive, **edit that same message** in place, throttled to ~1 edit/sec (Telegram's rate limit is ~30 edits/min). Edits are coalesced: if deltas arrive faster than the throttle, only one edit per tick fires with the accumulated text so far.
-4. On `agent_end`, **finalize**: a last edit with the full concatenated text. If the final text exceeds Telegram's 4096-char limit, the first chunk pins the existing message and the rest are sent as replies (split on rune boundaries so multi-byte text stays valid UTF-8).
+4. Assistant Markdown is rendered through Telegram's `HTML` parse mode using a conservative stdlib converter (bold/italic/code blocks/links/headings/lists; unsupported Markdown remains escaped plain text).
+5. On `agent_end`, **finalize**: a last edit with the full concatenated text. If the final text exceeds Telegram's 4096-char limit, the first chunk pins the existing message and the rest are sent as replies (split on rune boundaries so multi-byte text stays valid UTF-8).
 
 Non-text messages are ignored in v1.
 
