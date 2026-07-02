@@ -1,65 +1,67 @@
 # Sessions
 
-A **session** is a pi transcript: a JSONL file on disk holding the message history for one channel. The session manager (`session/manager.go`) is the durable mapping from a `ChannelID` to its *current* transcript file path.
+A **session** is a pi transcript: a JSONL file on disk holding the message history for one channel. The session manager (`session/manager.go`) is the durable mapping from a typed `ChannelID` to its *current* transcript file path.
 
 ## The map
 
-`session.Manager` keeps `current map[ChannelID]string` (guarded by a `sync.RWMutex`) mapping each channel to its current session file. It is the single source of truth the pool consults when binding a slot to a channel: `Acquire` calls `switch_session` to point the pi process at the channel's current file.
+`session.Manager` keeps `current map[ChannelID]string` (guarded by a `sync.RWMutex`) mapping each typed channel to its current session file. It is the single source of truth the pool consults when binding a slot to a channel: `Acquire` calls `switch_session` to point the pi process at the channel's current file.
 
 Key operations:
 
-- `Current(ch)` — returns the current path for `ch`, lazily generating a fresh one on first sight (re-checking under the write lock to avoid a duplicate-path race).
-- `SetCurrent(ch, path)` / `ResyncFromState(ch, sessionFile)` — update the map; used after pi's `new_session` / `clone` / `switch_session` (the RPC client auto-resyncs via `get_state`).
-- `ListKnownChannels()` — sorted list of known channel ids.
+- `Current(ch)` — returns the current path for `ch`, lazily generating a fresh one on first sight.
+- `SetCurrent(ch, path)` / `ResyncFromState(ch, sessionFile)` — update the map.
+- `ListKnownChannels()` — sorted list of known typed channel ids.
+- `ListSessionFiles()` / `ResolveSessionKey(key)` — read-only introspection for the local session UI/export endpoints.
 
 ## File naming
 
 Each transcript is named:
 
-```
-<channelId>--<unixSeconds>--<uuid>.jsonl
+```text
+<channel-type>--<channel-id>--<YYYYMMDDTHHMMSSZ>--<uuid>.jsonl
 ```
 
 under `WALLE_SESSION_DIR` (default `/home/wall-e/sessions`). For example:
 
-```
-42--1719480000--a1b2c3d4e5f6a7b8.jsonl
+```text
+http--smoke--20260702T153012Z--a1b2c3d4e5f6a7b8.jsonl
+telegram--123456789--20260702T153055Z--d9876cafe1234567.jsonl
 ```
 
-- The channel id is **sanitized**: OS-unsafe chars (`/ \ : * ? " < > |`) are replaced with `_` and runs of `_` are collapsed, so the sanitized form never contains `--` (which would corrupt the rebuild parse). Empty / `.` / `..` map to `_`.
-- `<unixSeconds>` is the creation time; `<uuid>` is 8 random bytes hex-encoded (16 chars), with a time-based fallback so generation never blocks. Uniqueness within a `(channel, second)` bucket is what matters for the rebuild tiebreak.
+- `channel-type` is `http`, `telegram`, and future `discord`, `slack`, etc.
+- `channel-id` is the platform/channel identifier, sanitized for filenames.
+- The datestamp is UTC and lexicographically sortable.
+- `<uuid>` is 8 random bytes hex-encoded (16 chars), with a time-based fallback so generation never blocks.
+- Filename components are sanitized so they do not contain the `--` separator.
 
 ## Rebuild from disk on startup
 
-There is **no sidecar persistence** in v1. On startup the manager walks `WALLE_SESSION_DIR`, groups files by their sanitized channel prefix, and picks the highest `(timestamp, uuid)` per channel:
+There is no sidecar persistence. On startup the manager walks `WALLE_SESSION_DIR`, groups files by typed channel (`channel-type` + `channel-id`), and picks the newest `(datestamp, uuid)` per channel:
 
-```
-TestManager_RebuildFromDir:
-  chanA--1--u.jsonl
-  chanA--2--u.jsonl   <- Current("chanA") picks this (newest ts)
-  chanB--1--u.jsonl   <- Current("chanB")
-  README.txt          <- ignored (doesn't match the regex)
+```text
+http--chanA--20260702T153012Z--aaaa.jsonl
+http--chanA--20260702T153013Z--bbbb.jsonl   <- Current(http/chanA)
+telegram--chanB--20260702T153014Z--cccc.jsonl
+README.txt                                  <- ignored
 ```
 
-The rebuild **replaces** the in-memory map: a stale in-memory entry with no file on disk is dropped; a file the manager never saw is picked up. This is why filenames are the source of truth — the map is rebuilt lazily from them.
+The rebuild replaces the in-memory map: a stale in-memory entry with no file on disk is dropped; a file the manager never saw is picked up.
 
 ## switch_session is constrained
 
-A `switch_session` target **must** resolve inside `WALLE_SESSION_DIR` (after `EvalSymlinks` on the parent when it exists, with a prefix-wise fallback for not-yet-created files). Escapes via `..` or symlinks are rejected (`ErrPathOutsideSessionDir`) and the map is left untouched.
-
-This is the §8 risk mitigation from the plan: without it, a `switch_session` to an arbitrary path outside the session dir couldn't be recovered by the on-startup rebuild (the rebuild only scans the session dir), so a gateway restart would lose the binding. Constraining targets to live under the session dir keeps the rebuild-on-startup invariant intact.
+A `switch_session` target must resolve inside `WALLE_SESSION_DIR` (after `EvalSymlinks` on the parent when it exists, with a prefix-wise fallback for not-yet-created files). Escapes via `..` or symlinks are rejected (`ErrPathOutsideSessionDir`) and the map is left untouched.
 
 ## Channel identity
 
-`ChannelID` is a named `string` type, aliased between `session` and `pool`. Each front-end supplies its platform's stable id as a string:
+Construct typed ids with `session.NewChannelID(channelType, channelID)`:
 
-| Front-end | ChannelID |
-|---|---|
-| HTTP | the `channel` field from the JSON body |
-| Telegram | the Telegram chat id, decimal string |
-| Discord (planned) | the Discord channel id |
+| Front-end | channel type | channel id |
+|---|---|---|
+| HTTP | `http` | the `channel` field from the JSON body |
+| Telegram | `telegram` | the Telegram chat id, decimal string |
+| Discord (planned) | `discord` | the Discord channel id |
 
-Because the ChannelID is the filename prefix, a chat's transcripts are all grouped together on disk and survive gateway restarts.
+The local debug UI displays channel type and session date, but not raw channel id or uuid.
 
 ## Config
 

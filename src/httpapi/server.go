@@ -29,12 +29,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"wall-e/pool"
 	"wall-e/rpc"
+	"wall-e/session"
 )
 
 // Config configures the HTTP server.
@@ -47,6 +51,18 @@ type Config struct {
 	// QueueTimeout bounds how long Acquire may block on a busy channel before
 	// returning 503. Defaults to 60s.
 	QueueTimeout time.Duration
+	// SiteDir is the directory served at /. Empty disables static serving.
+	SiteDir string
+	// Sessions is the session manager used by the read-only debug endpoints.
+	Sessions *session.Manager
+	// RPCConfig is used by the default exporter to spawn a short-lived pi RPC
+	// process for export_html.
+	RPCConfig rpc.Config
+	// ExportTimeout bounds one session HTML export. Defaults to 30s.
+	ExportTimeout time.Duration
+	// Exporter writes exported session HTML to an output path. If nil and
+	// Sessions is configured, New installs the RPC-backed exporter.
+	Exporter SessionExporter
 }
 
 // Server is the wall-e HTTP gateway.
@@ -56,15 +72,48 @@ type Server struct {
 	mux  *http.ServeMux
 }
 
+// SessionExporter exports a session file to an HTML output path.
+type SessionExporter interface {
+	ExportHTML(ctx context.Context, sessionPath string, outputPath string) error
+}
+
+// RPCSessionExporter implements SessionExporter using a short-lived pi RPC
+// process, so debug exports do not disturb warm pool slots.
+type RPCSessionExporter struct{ RPCConfig rpc.Config }
+
+func (e RPCSessionExporter) ExportHTML(ctx context.Context, sessionPath string, outputPath string) error {
+	c, err := rpc.New(e.RPCConfig)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if _, _, err := c.SwitchSession(ctx, sessionPath); err != nil {
+		return err
+	}
+	_, err = c.ExportHTML(ctx, outputPath)
+	return err
+}
+
 // New builds a Server over the given pool. The pool owns per-channel
 // serialization; the HTTP layer only bounds the wait.
 func New(cfg Config, p *pool.Pool) *Server {
 	if cfg.QueueTimeout <= 0 {
 		cfg.QueueTimeout = 60 * time.Second
 	}
+	if cfg.ExportTimeout <= 0 {
+		cfg.ExportTimeout = 30 * time.Second
+	}
+	if cfg.Exporter == nil {
+		cfg.Exporter = RPCSessionExporter{RPCConfig: cfg.RPCConfig}
+	}
 	s := &Server{cfg: cfg, pool: p, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/v1/prompt", s.handlePrompt)
+	s.mux.HandleFunc("/v1/sessions", s.handleSessions)
+	s.mux.HandleFunc("/v1/sessions/", s.handleSessionExport)
+	if cfg.SiteDir != "" {
+		s.mux.Handle("/", http.FileServer(http.Dir(cfg.SiteDir)))
+	}
 	return s
 }
 
@@ -81,9 +130,8 @@ func (s *Server) ListenAndServe() error {
 	return srv.ListenAndServe()
 }
 
-// ConfigFromEnv builds an httpapi.Config from WALLE_* env vars (Phase 4 cares
-// about WALLE_TOKEN, WALLE_PORT, WALLE_HTTP_QUEUE_TIMEOUT). Returns an error
-// if WALLE_TOKEN is unset or empty.
+// ConfigFromEnv builds an httpapi.Config from WALLE_* env vars. Returns an
+// error if WALLE_TOKEN is unset or empty.
 func ConfigFromEnv() (Config, error) {
 	cfg := Config{Token: os.Getenv("WALLE_TOKEN")}
 	port := os.Getenv("WALLE_PORT")
@@ -104,6 +152,20 @@ func ConfigFromEnv() (Config, error) {
 	if cfg.QueueTimeout <= 0 {
 		cfg.QueueTimeout = 60 * time.Second
 	}
+	cfg.SiteDir = os.Getenv("WALLE_SITE")
+	if cfg.SiteDir == "" {
+		cfg.SiteDir = "/opt/wall-e/www"
+	}
+	if et := os.Getenv("WALLE_SESSION_EXPORT_TIMEOUT"); et != "" {
+		d, err := time.ParseDuration(et)
+		if err != nil {
+			return cfg, fmt.Errorf("httpapi: invalid WALLE_SESSION_EXPORT_TIMEOUT %q: %w", et, err)
+		}
+		cfg.ExportTimeout = d
+	}
+	if cfg.ExportTimeout <= 0 {
+		cfg.ExportTimeout = 30 * time.Second
+	}
 	return cfg, nil
 }
 
@@ -113,6 +175,85 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/v1/sessions" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSONError(w, 405, "method not allowed")
+		return
+	}
+	if s.cfg.Sessions == nil {
+		writeJSONError(w, 404, "sessions unavailable")
+		return
+	}
+	sessions, err := s.cfg.Sessions.ListSessionFiles()
+	if err != nil {
+		writeJSONError(w, 500, fmt.Sprintf("list sessions failed: %v", err))
+		return
+	}
+	writeJSON(w, 200, map[string]any{"sessions": sessions})
+}
+
+func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSONError(w, 405, "method not allowed")
+		return
+	}
+	const prefix = "/v1/sessions/"
+	if !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, "/export.html") {
+		http.NotFound(w, r)
+		return
+	}
+	key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/export.html")
+	key = strings.Trim(key, "/")
+	if key == "" || strings.Contains(key, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	if s.cfg.Sessions == nil {
+		writeJSONError(w, 404, "sessions unavailable")
+		return
+	}
+	sf, ok, err := s.cfg.Sessions.ResolveSessionKey(key)
+	if err != nil {
+		writeJSONError(w, 500, fmt.Sprintf("resolve session failed: %v", err))
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	tmp, err := os.CreateTemp("", "walle-session-*.html")
+	if err != nil {
+		writeJSONError(w, 500, fmt.Sprintf("create temp file failed: %v", err))
+		return
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	exportCtx, cancel := context.WithTimeout(r.Context(), s.cfg.ExportTimeout)
+	defer cancel()
+	if err := s.cfg.Exporter.ExportHTML(exportCtx, sf.Path, tmpPath); err != nil {
+		writeJSONError(w, 502, fmt.Sprintf("export session failed: %v", err))
+		return
+	}
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		writeJSONError(w, 500, fmt.Sprintf("open export failed: %v", err))
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="session-%s.html"`, safeDownloadName(sf.Datestamp)))
+	w.WriteHeader(200)
+	_, _ = io.Copy(w, f)
 }
 
 // promptRequest is the body of POST /v1/prompt.
@@ -149,7 +290,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	// the channel is busy for longer than QueueTimeout, return 503.
 	acqCtx, acqCancel := context.WithTimeout(r.Context(), s.cfg.QueueTimeout)
 	defer acqCancel()
-	chID := pool.ChannelID(req.Channel)
+	chID := pool.ChannelID(session.NewChannelID("http", req.Channel))
 	slot, err := s.pool.Acquire(acqCtx, chID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -268,10 +409,27 @@ func writeSSE(w http.ResponseWriter, name, data string) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data)
 }
 
-// writeJSONError writes a JSON error response.
-func writeJSONError(w http.ResponseWriter, code int, msg string) {
+func safeDownloadName(s string) string {
+	out := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == 'T' || r == 'Z' {
+			return r
+		}
+		return '-'
+	}, s)
+	if out == "" {
+		return "session"
+	}
+	return filepath.Base(out)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	b, _ := json.Marshal(map[string]string{"error": msg})
+	b, _ := json.Marshal(v)
 	_, _ = w.Write(b)
+}
+
+// writeJSONError writes a JSON error response.
+func writeJSONError(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
 }

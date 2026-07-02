@@ -59,6 +59,7 @@ RUN deluser --remove-home ubuntu && \
 
 COPY --from=build /usr/local/bin/wall-e /usr/local/bin/wall-e
 COPY --chown=wall-e:wall-e static/SYSTEM.md /opt/wall-e/SYSTEM.md
+COPY --chown=wall-e:wall-e static/www/ /opt/wall-e/www/
 COPY --chown=wall-e:wall-e static/CONTEXT.md /home/wall-e/CONTEXT.md
 
 USER wall-e
@@ -68,6 +69,7 @@ COPY --chown=wall-e:wall-e static/.vimrc static/.tmux.conf ./
 RUN mkdir -p .config/nvim && ln -s /home/wall-e/.vimrc .config/nvim/init.vim
 
 ENV WALLE_SESSION_DIR=/home/wall-e/sessions
+ENV WALLE_SITE=/opt/wall-e/www
 ENV PI_CODING_AGENT_DIR=/opt/pi
 
 COPY --chown=wall-e:wall-e static/APPEND_SYSTEM.md /opt/pi

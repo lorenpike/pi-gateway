@@ -33,6 +33,7 @@ import (
 
 	"wall-e/pool"
 	"wall-e/rpc"
+	"wall-e/session"
 )
 
 // Frontend is a chat front-end (Telegram, Discord, ...) the gateway runs
@@ -124,8 +125,8 @@ type Bot struct {
 
 	botID int64
 
-	ctx     context.Context
-	cancel  context.CancelFunc
+	ctx      context.Context
+	cancel   context.CancelFunc
 	pollDone chan struct{}
 
 	// turnsWG tracks in-flight turn goroutines so Stop can drain them.
@@ -352,7 +353,7 @@ func (b *Bot) runTurn(chatID int64, text string, ts *turnState) {
 		b.turnsMu.Unlock()
 	}()
 
-	chID := pool.ChannelID(strconv.FormatInt(chatID, 10))
+	chID := pool.ChannelID(session.NewChannelID("telegram", strconv.FormatInt(chatID, 10)))
 	slot, err := b.pool.Acquire(b.ctx, chID)
 	ts.slot = slot
 	ts.acquireErr = err

@@ -1,6 +1,6 @@
 # HTTP channel
 
-The HTTP front-end exposes two endpoints over the worker pool. It does **not** re-serialize same-channel requests itself — the pool does — it only bounds the Acquire wait with a queue timeout and streams pi events back as SSE.
+The HTTP front-end exposes the prompt API over the worker pool plus a local read-only session-debug UI. It does **not** re-serialize same-channel prompt requests itself — the pool does — it only bounds the Acquire wait with a queue timeout and streams pi events back as SSE.
 
 ## Endpoints
 
@@ -13,6 +13,18 @@ No auth. Returns `200` with a JSON body:
 ```
 
 Use it for container healthchecks and smoke tests.
+
+### `GET /`
+
+No auth. Serves the static read-only session UI from `WALLE_SITE`.
+
+### `GET /v1/sessions`
+
+No auth. Returns all typed session files grouped-friendly for the UI. The response omits raw channel ids and uuids.
+
+### `GET /v1/sessions/{key}/export.html`
+
+No auth. Exports the selected session via pi's `export_html` RPC command into a temporary file and returns it as `text/html`.
 
 ### `POST /v1/prompt`
 
@@ -90,3 +102,5 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 | `WALLE_TOKEN` | — | required bearer token |
 | `WALLE_PORT` | `6007` | listen port |
 | `WALLE_HTTP_QUEUE_TIMEOUT` | `60s` | max wait on a busy channel → 503 |
+| `WALLE_SITE` | `/opt/wall-e/www` | static session-debug UI dir |
+| `WALLE_SESSION_EXPORT_TIMEOUT` | `30s` | max time to export a session HTML file |

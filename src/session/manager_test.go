@@ -9,9 +9,9 @@ import (
 )
 
 // pathRe asserts the on-disk naming scheme basename:
-// <channel>--<unixSeconds>--<uuid>.jsonl. We match on the basename only so
-// the test is OS-agnostic about path separators.
-var pathRe = regexp.MustCompile(`^[^/\\]+--\d+--[0-9a-zA-Z_-]+\.jsonl$`)
+// <channel-type>--<channel-id>--<YYYYMMDDTHHMMSSZ>--<uuid>.jsonl. We match on
+// the basename only so the test is OS-agnostic about path separators.
+var pathRe = regexp.MustCompile(`^[^/\\]+--[^/\\]+--\d{8}T\d{6}Z--[0-9a-zA-Z_-]+\.jsonl$`)
 
 // newManager makes a Manager rooted at a per-test temp dir.
 func newManager(t *testing.T) *Manager {
@@ -39,18 +39,18 @@ func writeSessionFile(t *testing.T, m *Manager, name string) {
 // (it was generated, not recalled).
 func TestManager_NewChannel_GeneratesPath(t *testing.T) {
 	m := newManager(t)
-	p, ok := m.Current("discord-123")
+	p, ok := m.Current(NewChannelID("discord", "123"))
 	if ok {
 		t.Fatalf("first Current() should be ok=false, got ok=true path=%q", p)
 	}
 	if !pathRe.MatchString(filepath.Base(p)) {
-		t.Errorf("path %q basename does not match <channel>--<ts>--<uuid>.jsonl", filepath.Base(p))
+		t.Errorf("path %q basename does not match typed session filename", filepath.Base(p))
 	}
 	if !strings.HasSuffix(p, ".jsonl") {
 		t.Errorf("path %q should end with .jsonl", p)
 	}
-	if !strings.Contains(filepath.Base(p), "discord-123--") {
-		t.Errorf("path %q should contain the channel id prefix", filepath.Base(p))
+	if !strings.HasPrefix(filepath.Base(p), "discord--123--") {
+		t.Errorf("path %q should contain typed channel prefix", filepath.Base(p))
 	}
 }
 
@@ -58,12 +58,12 @@ func TestManager_NewChannel_GeneratesPath(t *testing.T) {
 // ok=true.
 func TestManager_Roundtrip(t *testing.T) {
 	m := newManager(t)
-	ch := ChannelID("http-client-1")
-	const want = "/home/wall-e/sessions/http-client-1--1000--deadbeef.jsonl"
+	ch := NewChannelID("http", "client-1")
+	const want = "/home/wall-e/sessions/http--client-1--20260702T153012Z--deadbeef.jsonl"
 	// SetCurrent validates the path lives under SessionDir; for this test we
 	// craft a path that does. The simplest way: a path directly under the
 	// manager's dir.
-	wantPath := filepath.Join(m.SessionDir(), "http-client-1--1000--deadbeef.jsonl")
+	wantPath := filepath.Join(m.SessionDir(), "http--client-1--20260702T153012Z--deadbeef.jsonl")
 	if err := m.SetCurrent(ch, wantPath); err != nil {
 		t.Fatalf("SetCurrent: %v", err)
 	}
@@ -81,14 +81,14 @@ func TestManager_Roundtrip(t *testing.T) {
 // map is updated (used after new_session/clone/switch_session).
 func TestManager_ResyncFromState(t *testing.T) {
 	m := newManager(t)
-	ch := ChannelID("tg-42")
+	ch := NewChannelID("telegram", "42")
 
 	// First, an initial generation.
 	_, _ = m.Current(ch)
 
 	// Now resync from a get_state result (absolute path under the session
 	// dir, matching what pi would return).
-	resyncPath := filepath.Join(m.SessionDir(), "tg-42--2000--cafef00d.jsonl")
+	resyncPath := filepath.Join(m.SessionDir(), "telegram--42--20260702T153012Z--cafef00d.jsonl")
 	if err := m.ResyncFromState(ch, resyncPath); err != nil {
 		t.Fatalf("ResyncFromState: %v", err)
 	}
@@ -105,13 +105,14 @@ func TestManager_ResyncFromState(t *testing.T) {
 func TestManager_ListKnownChannels(t *testing.T) {
 	m := newManager(t)
 	// Seed three channels out of order.
-	for _, ch := range []ChannelID{"c-c", "c-a", "c-b"} {
-		if err := m.SetCurrent(ch, filepath.Join(m.SessionDir(), string(ch)+"--1--u.jsonl")); err != nil {
+	for _, ch := range []ChannelID{NewChannelID("http", "c-c"), NewChannelID("http", "c-a"), NewChannelID("http", "c-b")} {
+		_, id := ch.parts()
+		if err := m.SetCurrent(ch, filepath.Join(m.SessionDir(), "http--"+id+"--20260702T153012Z--u.jsonl")); err != nil {
 			t.Fatalf("SetCurrent(%s): %v", ch, err)
 		}
 	}
 	got := m.ListKnownChannels()
-	want := []ChannelID{"c-a", "c-b", "c-c"}
+	want := []ChannelID{NewChannelID("http", "c-a"), NewChannelID("http", "c-b"), NewChannelID("http", "c-c")}
 	if len(got) != len(want) {
 		t.Fatalf("got %d channels, want %d (%v)", len(got), len(want), got)
 	}
@@ -122,14 +123,13 @@ func TestManager_ListKnownChannels(t *testing.T) {
 	}
 }
 
-// TestManager_RebuildFromDir: given a dir containing chanA--1--u.jsonl and
-// chanA--2--u.jsonl and chanB--1--u.jsonl, Current("chanA") returns the newest
-// (--2--) file and Current("chanB") returns the chanB file.
+// TestManager_RebuildFromDir: given typed session files, Current returns the
+// newest file for each typed channel.
 func TestManager_RebuildFromDir(t *testing.T) {
 	m := newManager(t)
-	writeSessionFile(t, m, "chanA--1--aaaa.jsonl")
-	writeSessionFile(t, m, "chanA--2--bbbb.jsonl")
-	writeSessionFile(t, m, "chanB--1--cccc.jsonl")
+	writeSessionFile(t, m, "http--chanA--20260702T153012Z--aaaa.jsonl")
+	writeSessionFile(t, m, "http--chanA--20260702T153013Z--bbbb.jsonl")
+	writeSessionFile(t, m, "telegram--chanB--20260702T153014Z--cccc.jsonl")
 	// A junk file that does not match the scheme — must be ignored.
 	writeSessionFile(t, m, "README.txt")
 	writeSessionFile(t, m, "nope--notatimestamp--x.jsonl")
@@ -138,24 +138,24 @@ func TestManager_RebuildFromDir(t *testing.T) {
 		t.Fatalf("RebuildFromDir: %v", err)
 	}
 
-	gotA, okA := m.Current("chanA")
+	gotA, okA := m.Current(NewChannelID("http", "chanA"))
 	if !okA {
 		t.Fatalf("chanA not found after rebuild")
 	}
-	if !strings.HasSuffix(gotA, "chanA--2--bbbb.jsonl") {
-		t.Errorf("chanA current = %q, want the --2-- file", gotA)
+	if !strings.HasSuffix(gotA, "http--chanA--20260702T153013Z--bbbb.jsonl") {
+		t.Errorf("chanA current = %q, want newest file", gotA)
 	}
 
-	gotB, okB := m.Current("chanB")
+	gotB, okB := m.Current(NewChannelID("telegram", "chanB"))
 	if !okB {
 		t.Fatalf("chanB not found after rebuild")
 	}
-	if !strings.HasSuffix(gotB, "chanB--1--cccc.jsonl") {
-		t.Errorf("chanB current = %q, want the --1-- file", gotB)
+	if !strings.HasSuffix(gotB, "telegram--chanB--20260702T153014Z--cccc.jsonl") {
+		t.Errorf("chanB current = %q, want typed file", gotB)
 	}
 
 	// Channels never seen should still generate a fresh path.
-	gotC, okC := m.Current("chanC-new")
+	gotC, okC := m.Current(NewChannelID("http", "chanC-new"))
 	if okC {
 		t.Errorf("chanC-new should be generated (ok=false), got ok=true path=%q", gotC)
 	}
@@ -165,16 +165,16 @@ func TestManager_RebuildFromDir(t *testing.T) {
 // timestamps pick the lexicographically larger uuid for determinism.
 func TestManager_RebuildFromDir_TiebreakByUUID(t *testing.T) {
 	m := newManager(t)
-	writeSessionFile(t, m, "chan--500--aaaa.jsonl")
-	writeSessionFile(t, m, "chan--500--zzzz.jsonl")
+	writeSessionFile(t, m, "http--chan--20260702T153012Z--aaaa.jsonl")
+	writeSessionFile(t, m, "http--chan--20260702T153012Z--zzzz.jsonl")
 	if err := m.RebuildFromDir(); err != nil {
 		t.Fatalf("RebuildFromDir: %v", err)
 	}
-	got, ok := m.Current("chan")
+	got, ok := m.Current(NewChannelID("http", "chan"))
 	if !ok {
 		t.Fatalf("chan not found")
 	}
-	if !strings.HasSuffix(got, "chan--500--zzzz.jsonl") {
+	if !strings.HasSuffix(got, "http--chan--20260702T153012Z--zzzz.jsonl") {
 		t.Errorf("tiebreak should pick zzzz, got %q", got)
 	}
 }
@@ -185,19 +185,19 @@ func TestManager_RebuildFromDir_TiebreakByUUID(t *testing.T) {
 func TestManager_RebuildReplacesState(t *testing.T) {
 	m := newManager(t)
 	// Stale in-memory only (no file on disk).
-	if err := m.SetCurrent("ghost", filepath.Join(m.SessionDir(), "ghost--1--x.jsonl")); err != nil {
+	if err := m.SetCurrent(NewChannelID("http", "ghost"), filepath.Join(m.SessionDir(), "http--ghost--20260702T153012Z--x.jsonl")); err != nil {
 		t.Fatalf("SetCurrent(ghost): %v", err)
 	}
 	// Real file on disk the manager doesn't know about.
-	writeSessionFile(t, m, "real--1--y.jsonl")
+	writeSessionFile(t, m, "http--real--20260702T153012Z--y.jsonl")
 
 	if err := m.RebuildFromDir(); err != nil {
 		t.Fatalf("RebuildFromDir: %v", err)
 	}
-	if _, ok := m.Current("ghost"); ok {
+	if _, ok := m.Current(NewChannelID("http", "ghost")); ok {
 		t.Errorf("ghost should be gone after rebuild (no file on disk)")
 	}
-	if _, ok := m.Current("real"); !ok {
+	if _, ok := m.Current(NewChannelID("http", "real")); !ok {
 		t.Errorf("real should be present after rebuild")
 	}
 }
@@ -241,7 +241,7 @@ func TestManager_ResyncFromState_Empty(t *testing.T) {
 // with the first even within the same second).
 func TestManager_NewSessionPath_Uniqueness(t *testing.T) {
 	m := newManager(t)
-	ch := ChannelID("ch")
+	ch := NewChannelID("http", "ch")
 	seen := make(map[string]bool, 100)
 	for i := 0; i < 100; i++ {
 		p := m.NewSessionPath(ch)
@@ -257,15 +257,15 @@ func TestManager_NewSessionPath_Uniqueness(t *testing.T) {
 // stays unambiguous during RebuildFromDir parsing).
 func TestManager_SanitizeChannelID(t *testing.T) {
 	cases := map[string]string{
-		"simple":          "simple",
-		"with/slash":      "with_slash",
-		`back\slash`:      "back_slash",
-		"col:on":          "col_on",
-		"star*quest?":     "star_quest_",
-		`quot"d":lt<gt>`:  "quot_d_lt_gt_",
-		"":                "_",
-		".":               "_",
-		"..":              "_",
+		"simple":         "simple",
+		"with/slash":     "with_slash",
+		`back\slash`:     "back_slash",
+		"col:on":         "col_on",
+		"star*quest?":    "star_quest",
+		`quot"d":lt<gt>`: "quot_d_lt_gt",
+		"":               "_",
+		".":              "_",
+		"..":             "_",
 	}
 	for in, want := range cases {
 		got := sanitizeChannelID(ChannelID(in))

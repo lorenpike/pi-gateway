@@ -583,6 +583,24 @@ func (c *Client) GetLastAssistantText(ctx context.Context) (string, error) {
 	return *out.Text, nil
 }
 
+// ExportHTML sends `export_html` and returns the path pi wrote.
+func (c *Client) ExportHTML(ctx context.Context, outputPath string) (string, error) {
+	resp, err := c.send(ctx, map[string]any{"type": "export_html", "outputPath": outputPath})
+	if err != nil {
+		return "", err
+	}
+	if !resp.Success {
+		return "", fmt.Errorf("rpc: export_html failed: %s", resp.Error)
+	}
+	var out struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(resp.Data, &out); err != nil {
+		return "", fmt.Errorf("rpc: decode export_html: %w", err)
+	}
+	return out.Path, nil
+}
+
 // GetSessionStats sends `get_session_stats`.
 func (c *Client) GetSessionStats(ctx context.Context) (json.RawMessage, error) {
 	resp, err := c.send(ctx, map[string]any{"type": "get_session_stats"})

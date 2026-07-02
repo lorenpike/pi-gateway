@@ -1,30 +1,23 @@
 // Package session owns the durable, stable mapping from a chat-platform
-// channel id (Discord channel id, Telegram chat id, HTTP client id, …) to the
-// *current* pi session transcript file path for that channel.
+// channel (HTTP client channel, Telegram chat id, Discord channel id, …) to
+// the current pi session transcript file path for that channel.
 //
-// The map is intentionally NOT persisted to a sidecar file in v1. Instead it is
-// rebuilt lazily from the session directory itself: every transcript filename
-// follows the scheme
+// Transcript filenames use the scheme
 //
-//	<channelId>--<unixSeconds>--<uuid>.jsonl
+//	<channel-type>--<channel-id>--<YYYYMMDDTHHMMSSZ>--<uuid>.jsonl
 //
-// so on startup the manager walks WALLE_SESSION_DIR, groups files by their
-// channel-id prefix, and treats the highest timestamp for each channel as the
-// "current" session for that channel. This makes restarts robust to the
-// gateway dying mid-turn: the newest file on disk is always the source of
-// truth, regardless of whether the in-memory map was up to date.
-//
-// Channel ids from chat platforms are already unique but not necessarily
-// filesystem-safe (e.g. they may contain '/' on HTTP clients). They are
-// sanitized (see sanitizeChannelID) before being used as a filename prefix,
-// so the on-disk prefix may differ from the logical channel id. The manager
-// keeps the logical id as the map key and only sanitizes for filename
-// construction / rebuild parsing.
+// where channel-type and channel-id are sanitized filename components. The
+// datestamp is UTC and lexicographically sortable. On startup the manager walks
+// WALLE_SESSION_DIR, groups files by typed channel, and treats the newest file
+// for each channel as current.
 package session
 
 import (
+	"bufio"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -36,24 +29,35 @@ import (
 	"time"
 )
 
-// ChannelID is the logical, platform-stable identifier for a channel. It is
-// used verbatim as the map key; only filename construction sanitizes it.
+// ChannelID is the typed, platform-stable identifier for a channel. Construct
+// values with NewChannelID so both components are normalized consistently for
+// filenames and restart recovery.
 type ChannelID string
+
+// NewChannelID builds a typed channel id. Examples: NewChannelID("http",
+// "smoke"), NewChannelID("telegram", "123456789").
+func NewChannelID(channelType, channelID string) ChannelID {
+	return ChannelID(sanitizeComponent(channelType) + "--" + sanitizeComponent(channelID))
+}
+
+func (ch ChannelID) parts() (channelType, channelID string) {
+	parts := strings.SplitN(string(ch), "--", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	// Defensive fallback for tests/callers that still pass a raw string. New
+	// code should use NewChannelID.
+	return "unknown", sanitizeComponent(string(ch))
+}
 
 // Config configures a Manager.
 type Config struct {
-	// SessionDir is the directory that holds all pi transcript files. It is
-	// the root used both for generating new paths and for rebuilding the map
-	// on startup. Must be non-empty and absolute or resolvable against the
-	// process working directory.
+	// SessionDir is the directory that holds all pi transcript files.
 	SessionDir string
 }
 
-// Manager tracks the current session file path per channel id.
-//
-// All methods are safe for concurrent use. The map is the source of truth at
-// runtime; the session directory is the source of truth across restarts (via
-// RebuildFromDir).
+// Manager tracks the current session file path per typed channel id.
+// All methods are safe for concurrent use.
 type Manager struct {
 	cfg Config
 
@@ -62,21 +66,36 @@ type Manager struct {
 }
 
 // ErrPathOutsideSessionDir is returned by SetCurrent / ResyncFromState when
-// the supplied path does not live under SessionDir. Per the plan's risk note
-// (§8), switch_session targets are constrained to live under the session dir
-// so the rebuild-on-startup invariant holds.
+// the supplied path does not live under SessionDir.
 var ErrPathOutsideSessionDir = errors.New("session: path is outside session dir")
 
-// filenameRe matches the on-disk transcript naming scheme. The channel prefix
-// is greedy up to the last "--" so that sanitized channel ids containing
-// underscores etc. still parse. The timestamp is decimal seconds; the uuid is
-// any non-empty run of filename-safe chars. Note the separator between ts and
-// uuid is also "--" (double dash), matching NewSessionPath.
-var filenameRe = regexp.MustCompile(`^(.*)--(\d+)--([0-9a-zA-Z_-]+)\.jsonl$`)
+const datestampLayout = "20060102T150405Z"
+
+// SessionFile is metadata for one persisted pi session file. Path is omitted
+// from JSON responses; Key is the opaque identifier used by HTTP export routes.
+type SessionFile struct {
+	Key          string    `json:"key"`
+	ChannelType  string    `json:"channelType"`
+	Datestamp    string    `json:"datestamp"`
+	CreatedAt    time.Time `json:"createdAt"`
+	ModifiedAt   time.Time `json:"modifiedAt"`
+	SessionID    string    `json:"sessionId,omitempty"`
+	Name         string    `json:"name,omitempty"`
+	CWD          string    `json:"cwd,omitempty"`
+	MessageCount int       `json:"messageCount"`
+	Path         string    `json:"-"`
+}
+
+type parsedFilename struct {
+	channelType string
+	channelID   string
+	datestamp   string
+	createdAt   time.Time
+	uuid        string
+}
 
 // New creates a Manager and ensures SessionDir exists. It does NOT rebuild
-// from the directory; call RebuildFromDir explicitly (usually once at startup
-// after env parsing).
+// from the directory; call RebuildFromDir explicitly at startup.
 func New(cfg Config) (*Manager, error) {
 	if cfg.SessionDir == "" {
 		return nil, errors.New("session: SessionDir is required")
@@ -89,23 +108,14 @@ func New(cfg Config) (*Manager, error) {
 		return nil, fmt.Errorf("session: create session dir: %w", err)
 	}
 	cfg.SessionDir = abs
-	return &Manager{
-		cfg:     cfg,
-		current: make(map[ChannelID]string),
-	}, nil
+	return &Manager{cfg: cfg, current: make(map[ChannelID]string)}, nil
 }
 
 // SessionDir returns the absolute, cleaned session directory.
 func (m *Manager) SessionDir() string { return m.cfg.SessionDir }
 
-// Current returns the current session file path for ch. If the channel is
-// already known, its stored path is returned with ok=true. If the channel has
-// never been seen, a fresh path is generated (and stored) following the
-// naming scheme; ok=false signals it was newly generated rather than recalled.
-//
-// Generating a path here does NOT create the file on disk — pi creates the
-// file when it writes the first transcript line. The manager only owns the
-// *name*.
+// Current returns the current session file path for ch. If the channel has
+// never been seen, a fresh path is generated and stored, and ok=false.
 func (m *Manager) Current(ch ChannelID) (path string, ok bool) {
 	m.mu.RLock()
 	p, found := m.current[ch]
@@ -113,8 +123,6 @@ func (m *Manager) Current(ch ChannelID) (path string, ok bool) {
 	if found {
 		return p, true
 	}
-	// Upgrade to write lock to generate. Re-check under the write lock to
-	// avoid a race with a concurrent Current() for the same channel.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if p, found := m.current[ch]; found {
@@ -126,20 +134,15 @@ func (m *Manager) Current(ch ChannelID) (path string, ok bool) {
 }
 
 // NewSessionPath returns a brand-new transcript path for ch following the
-// naming scheme, without storing it as current. Useful when the caller
-// explicitly wants a new session (and will SetCurrent/ResyncFromState after
-// pi acknowledges it).
+// typed naming scheme, without storing it as current.
 func (m *Manager) NewSessionPath(ch ChannelID) string {
-	prefix := sanitizeChannelID(ch)
-	ts := time.Now().Unix()
-	uuid := newUUID()
-	name := fmt.Sprintf("%s--%d--%s.jsonl", prefix, ts, uuid)
+	channelType, channelID := ch.parts()
+	name := fmt.Sprintf("%s--%s--%s--%s.jsonl", channelType, channelID, time.Now().UTC().Format(datestampLayout), newUUID())
 	return filepath.Join(m.cfg.SessionDir, name)
 }
 
 // SetCurrent records path as the current session file for ch. The path must
-// live under SessionDir (after cleaning) or ErrPathOutsideSessionDir is
-// returned and the map is left untouched.
+// live under SessionDir.
 func (m *Manager) SetCurrent(ch ChannelID, path string) error {
 	if err := m.validatePath(path); err != nil {
 		return err
@@ -150,10 +153,7 @@ func (m *Manager) SetCurrent(ch ChannelID, path string) error {
 	return nil
 }
 
-// ResyncFromState updates the current path for ch based on a get_state result
-// (the sessionFile field). It is the post-new_session/clone/switch_session
-// hook used by the RPC client. The path is validated the same way as
-// SetCurrent.
+// ResyncFromState updates the current path for ch based on a get_state result.
 func (m *Manager) ResyncFromState(ch ChannelID, sessionFile string) error {
 	if sessionFile == "" {
 		return errors.New("session: empty sessionFile from get_state")
@@ -175,12 +175,9 @@ func (m *Manager) ListKnownChannels() []ChannelID {
 }
 
 // RebuildFromDir walks SessionDir and reconstructs the channel→path map by
-// parsing filenames. For each channel, the file with the highest unix-seconds
-// timestamp wins (ties broken by uuid lexicographically, for determinism).
-// Files that do not match the naming scheme are ignored.
-//
-// This replaces any in-memory state: it is the startup recovery path. Runtime
-// mutations (SetCurrent/ResyncFromState) continue to update the map afterward.
+// parsing typed session filenames. For each typed channel, the latest datestamp
+// wins (ties broken by uuid lexicographically, for determinism). Files that do
+// not match the typed naming scheme are ignored.
 func (m *Manager) RebuildFromDir() error {
 	entries, err := os.ReadDir(m.cfg.SessionDir)
 	if err != nil {
@@ -188,9 +185,9 @@ func (m *Manager) RebuildFromDir() error {
 	}
 
 	type cand struct {
-		path string
-		ts   int64
-		uuid string
+		path      string
+		createdAt time.Time
+		uuid      string
 	}
 	best := make(map[ChannelID]cand)
 
@@ -198,23 +195,15 @@ func (m *Manager) RebuildFromDir() error {
 		if e.IsDir() {
 			continue
 		}
-		name := e.Name()
-		match := filenameRe.FindStringSubmatch(name)
-		if match == nil {
+		pf, ok := parseSessionFilename(e.Name())
+		if !ok {
 			continue
 		}
-		prefix := match[1]
-		ts, err := parseUnixSeconds(match[2])
-		if err != nil {
-			continue
-		}
-		uuid := match[3]
-		ch := ChannelID(prefix) // prefix is already the sanitized form
-		full := filepath.Join(m.cfg.SessionDir, name)
-
+		ch := NewChannelID(pf.channelType, pf.channelID)
+		full := filepath.Join(m.cfg.SessionDir, e.Name())
 		cur, exists := best[ch]
-		if !exists || ts > cur.ts || (ts == cur.ts && uuid > cur.uuid) {
-			best[ch] = cand{path: full, ts: ts, uuid: uuid}
+		if !exists || pf.createdAt.After(cur.createdAt) || (pf.createdAt.Equal(cur.createdAt) && pf.uuid > cur.uuid) {
+			best[ch] = cand{path: full, createdAt: pf.createdAt, uuid: pf.uuid}
 		}
 	}
 
@@ -222,31 +211,152 @@ func (m *Manager) RebuildFromDir() error {
 	for ch, c := range best {
 		next[ch] = c.path
 	}
-
 	m.mu.Lock()
 	m.current = next
 	m.mu.Unlock()
 	return nil
 }
 
-// validatePath ensures path resolves to a location inside SessionDir. It
-// cleans and evaluates symlinks on the parent so "../" escapes and symlinks
-// pointing outside are rejected.
+// ListSessionFiles returns metadata for all typed session files under
+// SessionDir, sorted by channelType then newest first.
+func (m *Manager) ListSessionFiles() ([]SessionFile, error) {
+	entries, err := os.ReadDir(m.cfg.SessionDir)
+	if err != nil {
+		return nil, fmt.Errorf("session: read session dir: %w", err)
+	}
+	out := make([]SessionFile, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		pf, ok := parseSessionFilename(e.Name())
+		if !ok {
+			continue
+		}
+		full := filepath.Join(m.cfg.SessionDir, e.Name())
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		sf := SessionFile{
+			Key:         sessionKey(e.Name()),
+			ChannelType: pf.channelType,
+			Datestamp:   pf.datestamp,
+			CreatedAt:   pf.createdAt,
+			ModifiedAt:  info.ModTime().UTC(),
+			Path:        full,
+		}
+		m.readSessionMetadata(&sf)
+		out = append(out, sf)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ChannelType != out[j].ChannelType {
+			return out[i].ChannelType < out[j].ChannelType
+		}
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out, nil
+}
+
+// ResolveSessionKey resolves an opaque key from ListSessionFiles to metadata
+// and a path under SessionDir.
+func (m *Manager) ResolveSessionKey(key string) (SessionFile, bool, error) {
+	if key == "" || strings.ContainsAny(key, `/\`) || strings.Contains(key, "..") {
+		return SessionFile{}, false, nil
+	}
+	sessions, err := m.ListSessionFiles()
+	if err != nil {
+		return SessionFile{}, false, err
+	}
+	for _, sf := range sessions {
+		if sf.Key == key {
+			return sf, true, nil
+		}
+	}
+	return SessionFile{}, false, nil
+}
+
+func parseSessionFilename(name string) (parsedFilename, bool) {
+	if !strings.HasSuffix(name, ".jsonl") {
+		return parsedFilename{}, false
+	}
+	stem := strings.TrimSuffix(name, ".jsonl")
+	parts := strings.Split(stem, "--")
+	if len(parts) != 4 || parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
+		return parsedFilename{}, false
+	}
+	createdAt, err := time.Parse(datestampLayout, parts[2])
+	if err != nil {
+		return parsedFilename{}, false
+	}
+	if !filenameSafeRe.MatchString(parts[0]) || !filenameSafeRe.MatchString(parts[1]) || !filenameSafeRe.MatchString(parts[3]) {
+		return parsedFilename{}, false
+	}
+	return parsedFilename{channelType: parts[0], channelID: parts[1], datestamp: parts[2], createdAt: createdAt, uuid: parts[3]}, true
+}
+
+func sessionKey(filename string) string {
+	sum := sha256.Sum256([]byte(filename))
+	return hex.EncodeToString(sum[:16])
+}
+
+func (m *Manager) readSessionMetadata(sf *SessionFile) {
+	f, err := os.Open(sf.Path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	first := true
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(line), &head); err != nil {
+			continue
+		}
+		if first && head.Type == "session" {
+			var h struct {
+				ID  string `json:"id"`
+				CWD string `json:"cwd"`
+			}
+			if err := json.Unmarshal([]byte(line), &h); err == nil {
+				sf.SessionID = h.ID
+				sf.CWD = h.CWD
+			}
+		}
+		first = false
+		switch head.Type {
+		case "message":
+			sf.MessageCount++
+		case "session_info":
+			var info struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal([]byte(line), &info); err == nil {
+				sf.Name = info.Name
+			}
+		}
+	}
+}
+
+// validatePath ensures path resolves to a location inside SessionDir.
 func (m *Manager) validatePath(path string) error {
 	clean := filepath.Clean(path)
-	// Require an absolute path under the (absolute) SessionDir. If a relative
-	// path is supplied, resolve it against SessionDir first (callers from the
-	// RPC layer always send absolute paths from get_state, but be lenient).
 	if !filepath.IsAbs(clean) {
 		clean = filepath.Join(m.cfg.SessionDir, clean)
 	}
-	// Resolve the parent directory (the file itself may not exist yet) to
-	// catch symlink escapes.
 	parent := filepath.Dir(clean)
 	resolvedParent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
-		// Parent may not exist yet (new session file). Fall back to cleaning
-		// the parent without symlink evaluation and check prefix-wise.
 		resolvedParent = filepath.Clean(parent)
 	}
 	resolvedDir, err := filepath.EvalSymlinks(m.cfg.SessionDir)
@@ -260,25 +370,21 @@ func (m *Manager) validatePath(path string) error {
 	if rel == "." || rel == "" {
 		return nil
 	}
-	if strings.HasPrefix(rel, "..") {
-		return ErrPathOutsideSessionDir
-	}
-	// Also reject Windows drive-prefixed or rooted escapes.
-	if filepath.IsAbs(rel) {
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return ErrPathOutsideSessionDir
 	}
 	return nil
 }
 
-// sanitizeChannelID replaces characters that are unsafe as a filename
-// component with '_'. This keeps the on-disk prefix usable across platforms
-// (Linux rejects '/', Windows also rejects a handful of others) while
-// preserving enough of the original id to be recognizable.
-//
-// The sanitized form is what gets written to disk and parsed back during
-// RebuildFromDir; the logical ChannelID (map key) is left untouched.
-func sanitizeChannelID(ch ChannelID) string {
-	s := string(ch)
+var filenameSafeRe = regexp.MustCompile(`^[0-9A-Za-z_.-]+$`)
+var multiUnderscoreRe = regexp.MustCompile(`_{2,}`)
+var multiDashSepRe = regexp.MustCompile(`--+`)
+
+// sanitizeChannelID is kept for older tests/callers; it sanitizes a channel id
+// component. New code should use NewChannelID.
+func sanitizeChannelID(ch ChannelID) string { return sanitizeComponent(string(ch)) }
+
+func sanitizeComponent(s string) string {
 	repl := strings.NewReplacer(
 		string(os.PathSeparator), "_",
 		"/", "_",
@@ -290,47 +396,22 @@ func sanitizeChannelID(ch ChannelID) string {
 		"<", "_",
 		">", "_",
 		"|", "_",
+		" ", "_",
 	)
 	s = repl.Replace(s)
-	// Collapse runs of underscores for tidiness and to keep the "--"
-	// separator unambiguous (a sanitized id cannot contain a literal "--"
-	// that came from an unsafe char).
-	s = collapseUnderscores(s)
+	s = multiDashSepRe.ReplaceAllString(s, "_")
+	s = multiUnderscoreRe.ReplaceAllString(s, "_")
+	s = strings.Trim(s, "_")
 	if s == "" || s == "." || s == ".." {
 		s = "_"
 	}
 	return s
 }
 
-var multiUnderscoreRe = regexp.MustCompile(`_{2,}`)
-
-func collapseUnderscores(s string) string {
-	return multiUnderscoreRe.ReplaceAllString(s, "_")
-}
-
-// parseUnixSeconds parses a non-negative decimal unix timestamp.
-func parseUnixSeconds(s string) (int64, error) {
-	var n int64
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("session: bad timestamp %q", s)
-		}
-		n = n*10 + int64(r-'0')
-	}
-	if len(s) == 0 {
-		return 0, errors.New("session: empty timestamp")
-	}
-	return n, nil
-}
-
-// newUUID returns 16 hex chars from crypto/rand. It is not a strict RFC-4122
-// UUID; it only needs to be unique within a (channel, second) bucket to
-// disambiguate two sessions created in the same second.
+// newUUID returns 16 hex chars from crypto/rand.
 func newUUID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand should not fail in practice; fall back to time-based
-		// entropy so generation never blocks.
 		return fmt.Sprintf("%016x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b[:])

@@ -15,6 +15,8 @@ var allWalleEnv = []string{
 	"WALLE_TOKEN",
 	"WALLE_PORT",
 	"WALLE_HTTP_QUEUE_TIMEOUT",
+	"WALLE_SITE",
+	"WALLE_SESSION_EXPORT_TIMEOUT",
 	"WALLE_POOL_SIZE",
 	"WALLE_DRAIN_TIMEOUT",
 	"WALLE_SESSION_DIR",
@@ -53,6 +55,12 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 	}
 	if cfg.HTTP.QueueTimeout != 60*time.Second {
 		t.Errorf("HTTP.QueueTimeout = %v, want 60s", cfg.HTTP.QueueTimeout)
+	}
+	if cfg.HTTP.SiteDir != "/opt/wall-e/www" {
+		t.Errorf("HTTP.SiteDir = %q, want /opt/wall-e/www", cfg.HTTP.SiteDir)
+	}
+	if cfg.HTTP.ExportTimeout != 30*time.Second {
+		t.Errorf("HTTP.ExportTimeout = %v, want 30s", cfg.HTTP.ExportTimeout)
 	}
 	if cfg.Pool.Size != 4 {
 		t.Errorf("Pool.Size = %d, want 4", cfg.Pool.Size)
@@ -117,6 +125,8 @@ func TestLoad_ExplicitOverrides(t *testing.T) {
 	t.Setenv("WALLE_TOKEN", "tok")
 	t.Setenv("WALLE_PORT", "9090")
 	t.Setenv("WALLE_HTTP_QUEUE_TIMEOUT", "10s")
+	t.Setenv("WALLE_SITE", "/tmp/site")
+	t.Setenv("WALLE_SESSION_EXPORT_TIMEOUT", "15s")
 	t.Setenv("WALLE_POOL_SIZE", "8")
 	t.Setenv("WALLE_DRAIN_TIMEOUT", "5m")
 	t.Setenv("WALLE_SESSION_DIR", "/tmp/sess")
@@ -135,6 +145,12 @@ func TestLoad_ExplicitOverrides(t *testing.T) {
 	}
 	if cfg.HTTP.QueueTimeout != 10*time.Second {
 		t.Errorf("HTTP.QueueTimeout = %v, want 10s", cfg.HTTP.QueueTimeout)
+	}
+	if cfg.HTTP.SiteDir != "/tmp/site" {
+		t.Errorf("HTTP.SiteDir = %q, want /tmp/site", cfg.HTTP.SiteDir)
+	}
+	if cfg.HTTP.ExportTimeout != 15*time.Second {
+		t.Errorf("HTTP.ExportTimeout = %v, want 15s", cfg.HTTP.ExportTimeout)
 	}
 	if cfg.Pool.Size != 8 {
 		t.Errorf("Pool.Size = %d, want 8", cfg.Pool.Size)
@@ -177,6 +193,20 @@ func TestLoad_DurationParseErrors(t *testing.T) {
 		}
 		if !contains(err.Error(), "WALLE_HTTP_QUEUE_TIMEOUT") {
 			t.Errorf("error %q does not mention WALLE_HTTP_QUEUE_TIMEOUT", err.Error())
+		}
+	})
+
+	t.Run("bad WALLE_SESSION_EXPORT_TIMEOUT", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+		t.Setenv("WALLE_SESSION_EXPORT_TIMEOUT", "not-a-duration")
+
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !contains(err.Error(), "WALLE_SESSION_EXPORT_TIMEOUT") {
+			t.Errorf("error %q does not mention WALLE_SESSION_EXPORT_TIMEOUT", err.Error())
 		}
 	})
 

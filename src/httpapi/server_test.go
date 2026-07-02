@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -206,6 +208,12 @@ type sseEvent struct {
 	data string
 }
 
+type fakeExporter struct{}
+
+func (fakeExporter) ExportHTML(ctx context.Context, sessionPath string, outputPath string) error {
+	return os.WriteFile(outputPath, []byte("<html><body>exported "+filepath.Base(sessionPath)+"</body></html>"), 0o644)
+}
+
 func sseNames(ev []sseEvent) []string {
 	out := make([]string, len(ev))
 	for i, e := range ev {
@@ -231,6 +239,76 @@ func TestHealth_NoAuth_Returns200(t *testing.T) {
 	}
 	if got["status"] != "ok" {
 		t.Fatalf("body = %v, want status=ok", got)
+	}
+}
+
+func TestStaticSite_ServesIndex(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "index.html"), []byte("<h1>debug</h1>"), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	s := newServer(t, p, Config{Token: "sekret", SiteDir: site})
+	rr := do(t, s, http.MethodGet, "/", "", "")
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "debug") {
+		t.Fatalf("body = %q, want index contents", rr.Body.String())
+	}
+}
+
+func TestSessions_ListAndExport_NoAuth(t *testing.T) {
+	p, _, sm := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	name := "http--smoke--20260702T153012Z--abc123.jsonl"
+	path := filepath.Join(sm.SessionDir(), name)
+	body := strings.Join([]string{
+		`{"type":"session","version":3,"id":"sid-1","timestamp":"2026-07-02T15:30:12Z","cwd":"/home/wall-e"}`,
+		`{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-02T15:30:13Z","message":{"role":"user","content":"hi"}}`,
+		`{"type":"session_info","id":"i1","parentId":"m1","timestamp":"2026-07-02T15:30:14Z","name":"Smoke test"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	s := newServer(t, p, Config{Token: "sekret", Sessions: sm, Exporter: fakeExporter{}})
+
+	rr := do(t, s, http.MethodGet, "/v1/sessions", "", "")
+	if rr.Code != 200 {
+		t.Fatalf("list status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Sessions []struct {
+			Key          string `json:"key"`
+			ChannelType  string `json:"channelType"`
+			Datestamp    string `json:"datestamp"`
+			Name         string `json:"name"`
+			MessageCount int    `json:"messageCount"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(got.Sessions) != 1 {
+		t.Fatalf("sessions = %v, want 1", got.Sessions)
+	}
+	if got.Sessions[0].ChannelType != "http" || got.Sessions[0].Datestamp != "20260702T153012Z" || got.Sessions[0].Name != "Smoke test" || got.Sessions[0].MessageCount != 1 {
+		t.Fatalf("session metadata = %+v", got.Sessions[0])
+	}
+
+	exportPath := "/v1/sessions/" + got.Sessions[0].Key + "/export.html"
+	rr = do(t, s, http.MethodGet, exportPath, "", "")
+	if rr.Code != 200 {
+		t.Fatalf("export status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+	if !strings.Contains(rr.Body.String(), "exported "+name) {
+		t.Fatalf("export body = %q", rr.Body.String())
 	}
 }
 

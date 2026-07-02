@@ -29,6 +29,8 @@
 //	WALLE_CONFIRM_DEFAULT        true
 //	WALLE_LOG_LEVEL              info
 //	WALLE_HTTP_QUEUE_TIMEOUT     60s
+//	WALLE_SITE                   /opt/wall-e/www
+//	WALLE_SESSION_EXPORT_TIMEOUT 30s
 package config
 
 import (
@@ -62,15 +64,17 @@ type TelegramConfig struct {
 
 // Default values. Exported so tests and main can reference them.
 const (
-	DefaultPort             = "6007"
-	DefaultPoolSize         = 4
-	DefaultDrainTimeout     = 30 * time.Second
-	DefaultSessionDir       = "/home/wall-e/sessions"
-	DefaultPiBin            = "pi"
-	DefaultSystemPrompt     = "/opt/wall-e/SYSTEM.md"
-	DefaultConfirmDefault   = true
-	DefaultLogLevel         = "info"
-	DefaultHTTPQueueTimeout = 60 * time.Second
+	DefaultPort                 = "6007"
+	DefaultPoolSize             = 4
+	DefaultDrainTimeout         = 30 * time.Second
+	DefaultSessionDir           = "/home/wall-e/sessions"
+	DefaultPiBin                = "pi"
+	DefaultSystemPrompt         = "/opt/wall-e/SYSTEM.md"
+	DefaultConfirmDefault       = true
+	DefaultLogLevel             = "info"
+	DefaultHTTPQueueTimeout     = 60 * time.Second
+	DefaultSiteDir              = "/opt/wall-e/www"
+	DefaultSessionExportTimeout = 30 * time.Second
 )
 
 // Config is the gateway-wide configuration assembled from WALLE_* env vars.
@@ -129,10 +133,24 @@ func Load() (Config, error) {
 		errs = append(errs, err.Error())
 	}
 
+	// --- WALLE_SITE (default /opt/wall-e/www) ---------------------------
+	siteDir := os.Getenv("WALLE_SITE")
+	if siteDir == "" {
+		siteDir = DefaultSiteDir
+	}
+
+	// --- WALLE_SESSION_EXPORT_TIMEOUT (default 30s) ---------------------
+	sessionExportTimeout, err := parseDurationEnv("WALLE_SESSION_EXPORT_TIMEOUT", DefaultSessionExportTimeout)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+
 	cfg.HTTP = httpapi.Config{
-		Token:        token,
-		Addr:         ":" + port,
-		QueueTimeout: httpQueueTimeout,
+		Token:         token,
+		Addr:          ":" + port,
+		QueueTimeout:  httpQueueTimeout,
+		SiteDir:       siteDir,
+		ExportTimeout: sessionExportTimeout,
 	}
 
 	// --- WALLE_POOL_SIZE (default 4) ------------------------------------

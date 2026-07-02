@@ -91,6 +91,8 @@ func run(ctx context.Context, cfg config.Config) error {
 	//    httpapi.Server.ListenAndServe) so we can Shutdown it gracefully and
 	//    so the "listening" log fires only after the socket is bound. The
 	//    httpapi.Server is just the handler + config holder here.
+	cfg.HTTP.Sessions = mgr
+	cfg.HTTP.RPCConfig = cfg.RPC
 	srv := httpapi.New(cfg.HTTP, p)
 	listener, err := net.Listen("tcp", cfg.HTTP.Addr)
 	if err != nil {
