@@ -1,155 +1,69 @@
 # User-space service supervision — Implementation Plan
 
 **Date:** 2026-07-03
-**Status:** Planning
 
-## 1. Goal
+## Goal
 
-Turn the gateway container into a long-lived, agent-managed workspace where
-client-specific services can be created, updated, started, stopped, and routed
-without rebuilding the Docker image or restarting the container.
+Use `supervisord` inside the gateway container so the agent can keep project
+services running without rebuilding the image or relying on `nohup`, `tmux`, or
+background shell jobs. Docker remains the sandbox/persistence boundary.
 
-The outer Docker container remains the persistence/sandbox boundary. Inside it,
-`supervisord` provides a small user-space service manager for `wall-e`, optional
-reverse proxy, and per-client server programs under `/home/wall-e/...`.
+System/admin programs (`wall-e`, `nginx`, optional `cloudflared`) are configured
+under `/etc`. User/project services are configured from the user's home
+directory. Project code can live anywhere under `/home/wall-e`; this plan does
+not prescribe that layout.
 
-Example target shape:
-
-```text
-container
-├── tini                         PID 1, signal/zombie handling
-├── supervisord                  service manager
-│   ├── wall-e                   gateway HTTP/chat process
-│   ├── nginx or caddy           optional reverse proxy
-│   └── client services          node/python/go/etc.
-└── /home/wall-e/
-    ├── clients/
-    │   └── acme-site/
-    ├── services/
-    │   ├── available/
-    │   └── enabled/
-    ├── proxy/
-    │   └── sites-enabled/
-    └── logs/
-```
-
-## 2. Non-goals
-
-- Replace Docker/Compose/Kubernetes for normal multi-container production
-  deployments.
-- Add a full hosting platform or web admin UI in the first version.
-- Run systemd inside the container.
-- Require container restarts for normal client app deploys.
-- Require root-owned service files for day-to-day agent operations.
-
-## 3. Design principles
-
-1. **Docker is the outer sandbox.** The container can be restarted/recreated by
-   external infrastructure, but routine app changes happen inside `/home/wall-e`.
-2. **Supervisor is the inner service manager.** The agent edits service config
-   and calls `supervisorctl reread/update/restart`.
-3. **User-space by default.** Client code, service definitions, proxy snippets,
-   logs, and runtime state live under `/home/wall-e`.
-4. **Hot reload over rebuild.** Updating a Node site should normally mean
-   `git pull`, dependency/build steps, `supervisorctl restart <service>`, and
-   proxy reload if routing changed.
-5. **Keep `wall-e` simple.** Do not make the Go gateway itself responsible for
-   supervising arbitrary server processes in v1.
-
-## 4. Tool choice
-
-Use `supervisord` for v1.
-
-Reasons:
-
-- Mature and widely packaged on Ubuntu.
-- Simple INI config that is easy for the agent to inspect and modify.
-- `supervisorctl` gives clear primitives: `status`, `start`, `stop`, `restart`,
-  `reread`, and `update`.
-- Works without systemd.
-- Good enough for mixed Node/Python/Go/static helper processes.
-
-Alternatives considered:
-
-| Tool | Notes |
-|---|---|
-| `runit` | Smaller and cleaner, but less self-describing for dynamic agent edits. |
-| `s6` / `s6-overlay` | Excellent container option, but higher complexity for this use case. |
-| `pm2` | Good for Node-only apps, less appropriate as a mixed-language supervisor. |
-| shell scripts / `tmux` / `nohup` | Fine for debugging, not acceptable for durable service management. |
-
-## 5. Directory layout
-
-Create these directories in the image and keep them writable by `wall-e`:
+## Directory layout
 
 ```text
-/home/wall-e/clients/              client/application checkouts
-/home/wall-e/services/             supervisor config root
-/home/wall-e/services/enabled/     active supervisord program snippets
-/home/wall-e/services/available/   inactive/template snippets
-/home/wall-e/proxy/                reverse-proxy config root
-/home/wall-e/proxy/sites-enabled/  active site snippets
-/home/wall-e/logs/                 app/proxy/supervisor logs
-/home/wall-e/run/                  pid/sock files
+/etc/supervisor/supervisord.conf          base supervisor config
+/etc/supervisor/conf.d/*.conf             admin-managed programs
+/etc/nginx/                               admin-managed nginx base config
+/etc/cloudflared/                         admin-managed tunnel config, if used
+/home/wall-e/.config/supervisor.d/*.conf  user/project service snippets
+/home/wall-e/.config/nginx/conf.d/*.conf  user/project nginx route snippets
+/home/wall-e/sessions/                    wall-e session exports
+/var/log/wall-e/*.log                     persisted logs
+/var/run/supervisor.sock                  supervisor control socket
 ```
 
-The service manager should include all active snippets from:
+No `enabled/` / `available/` split. Active user services are simply
+`~/.config/supervisor.d/*.conf`. To disable one, stop it and rename its snippet
+from `name.conf` to `name.conf.disabled`.
 
-```text
-/home/wall-e/services/enabled/*.conf
-```
+## Supervisor config
 
-## 6. Supervisor configuration
-
-Install `supervisor` in the runtime image and make it the main process under
-`tini`.
-
-Container process tree:
-
-```text
-tini
-└── supervisord
-    ├── wall-e
-    ├── nginx/caddy  optional
-    └── client apps  optional
-```
-
-Base config at:
-
-```text
-/etc/supervisor/supervisord.conf
-```
-
-Proposed base config:
+`/etc/supervisor/supervisord.conf`:
 
 ```ini
 [unix_http_server]
-file=/home/wall-e/run/supervisor.sock
+file=/var/run/supervisor.sock
 chmod=0700
 chown=wall-e:wall-e
 
 [supervisord]
 nodaemon=true
-logfile=/home/wall-e/logs/supervisord.log
-pidfile=/home/wall-e/run/supervisord.pid
-childlogdir=/home/wall-e/logs
+logfile=/var/log/wall-e/supervisord.log
+pidfile=/var/run/supervisord.pid
+childlogdir=/var/log/wall-e
 
 [rpcinterface:supervisor]
 supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
 
 [supervisorctl]
-serverurl=unix:///home/wall-e/run/supervisor.sock
+serverurl=unix:///var/run/supervisor.sock
 
 [include]
-files = /home/wall-e/services/enabled/*.conf
+files = /etc/supervisor/conf.d/*.conf /home/wall-e/.config/supervisor.d/*.conf
 ```
 
-Default `wall-e` program snippet:
+`/etc/supervisor/conf.d/wall-e.conf`:
 
 ```ini
 [program:wall-e]
 command=/usr/local/bin/wall-e
 directory=/home/wall-e
+user=wall-e
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -159,239 +73,117 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
-environment=HOME="/home/wall-e",PI_CODING_AGENT_DIR="/opt/pi",WALLE_SESSION_DIR="/home/wall-e/sessions",WALLE_SITE="/opt/wall-e/www"
 ```
 
-Notes:
+`wall-e` receives its environment from the container. Defaults such as
+`HOME`, `PI_CODING_AGENT_DIR`, `WALLE_SESSION_DIR`, and `WALLE_SITE` should be
+set with Docker `ENV`, not hardcoded in the supervisor snippet.
 
-- `stdout_logfile_maxbytes=0` avoids supervisor trying to rotate Docker stdout.
-- `stopasgroup`/`killasgroup` ensure child process groups are cleaned up.
-- Environment inherited from Docker should still be available; explicit values
-  are only for stable defaults.
+## Nginx routing
 
-## 7. Agent service workflow
+Nginx is the in-container local router. It is supervised by `supervisord`.
+The base config is admin-managed under `/etc/nginx`, and may include
+user/project route snippets from `~/.config/nginx/conf.d/*.conf`. It does not
+terminate public TLS in v1; Cloudflare handles external access.
 
-For a new Node service named `acme-site`:
+`/etc/supervisor/conf.d/nginx.conf`:
+
+```ini
+[program:nginx]
+command=/usr/sbin/nginx -g 'daemon off;'
+autostart=true
+autorestart=true
+stopsignal=QUIT
+stdout_logfile=/var/log/wall-e/nginx.out.log
+stderr_logfile=/var/log/wall-e/nginx.err.log
+```
+
+Example user route in `~/.config/nginx/conf.d/acme-site.conf`:
+
+```nginx
+server {
+    listen 127.0.0.1:8080;
+    location /acme/ { proxy_pass http://127.0.0.1:3101/; }
+}
+```
+
+Reload after routing changes:
 
 ```sh
-mkdir -p ~/clients/acme-site
-cd ~/clients/acme-site
-git clone <repo> app
-cd app
-npm ci
-npm run build
+nginx -t && supervisorctl signal HUP nginx
 ```
 
-Create `/home/wall-e/services/enabled/acme-site.conf`:
+## User/project service workflow
+
+The code location is project-specific and should be under `/home/wall-e`. This
+example uses `~/services/acme-site/app`, but that is not a required layout.
+
+`~/.config/supervisor.d/acme-site.conf`:
 
 ```ini
 [program:acme-site]
-directory=/home/wall-e/clients/acme-site/app
+directory=/home/wall-e/services/acme-site/app
 command=/usr/bin/npm start
+user=wall-e
 autostart=true
 autorestart=true
 startsecs=3
 stopasgroup=true
 killasgroup=true
 environment=PORT="3101",NODE_ENV="production",HOME="/home/wall-e"
-stdout_logfile=/home/wall-e/logs/acme-site.out.log
-stderr_logfile=/home/wall-e/logs/acme-site.err.log
+stdout_logfile=/var/log/wall-e/acme-site.out.log
+stderr_logfile=/var/log/wall-e/acme-site.err.log
 ```
 
-Apply changes without restarting Docker:
+Apply, inspect, restart, or disable:
 
 ```sh
-supervisorctl -c /etc/supervisor/supervisord.conf reread
-supervisorctl -c /etc/supervisor/supervisord.conf update
-supervisorctl -c /etc/supervisor/supervisord.conf status acme-site
-```
-
-Update deployment:
-
-```sh
-cd ~/clients/acme-site/app
-git pull --ff-only
-npm ci
-npm run build
-supervisorctl restart acme-site
-```
-
-Disable service:
-
-```sh
-supervisorctl stop acme-site
-mv ~/services/enabled/acme-site.conf ~/services/available/acme-site.conf
-supervisorctl reread
-supervisorctl update
-```
-
-## 8. Reverse proxy strategy
-
-Two viable options:
-
-### Option A: nginx
-
-Run nginx under supervisor with a home-rooted config. This is familiar and very
-flexible, but non-root nginx should listen on high ports unless the container is
-given `CAP_NET_BIND_SERVICE` or Docker maps host `80/443` to container high
-ports.
-
-Suggested config root:
-
-```text
-/home/wall-e/proxy/nginx.conf
-/home/wall-e/proxy/sites-enabled/*.conf
-/home/wall-e/logs/nginx-access.log
-/home/wall-e/logs/nginx-error.log
-```
-
-Supervisor snippet:
-
-```ini
-[program:nginx]
-command=/usr/sbin/nginx -p /home/wall-e/proxy -c nginx.conf -g 'daemon off;'
-autostart=true
-autorestart=true
-stopsignal=QUIT
-stdout_logfile=/home/wall-e/logs/nginx.out.log
-stderr_logfile=/home/wall-e/logs/nginx.err.log
-```
-
-Reload after route changes:
-
-```sh
-nginx -p /home/wall-e/proxy -c nginx.conf -t
-nginx -p /home/wall-e/proxy -c nginx.conf -s reload
-```
-
-Example site snippet:
-
-```nginx
-server {
-    listen 8080;
-    server_name _;
-
-    location /acme/ {
-        proxy_pass http://127.0.0.1:3101/;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-### Option B: Caddy
-
-Caddy may be simpler for agent-managed dynamic routing, especially if HTTPS is
-needed later. It supports concise config and hot reload:
-
-```sh
-caddy reload --config /home/wall-e/proxy/Caddyfile
-```
-
-For v1, choose one proxy. If nginx is selected, keep the config entirely under
-`/home/wall-e/proxy` and expose only a high container port by default.
-
-## 9. Dockerfile changes
-
-- Install `supervisor`.
-- Optionally install `nginx` if chosen for v1 proxy support.
-- Create writable user-space directories.
-- Copy default supervisor snippets.
-- Change `CMD` from `wall-e` to `supervisord`.
-- Keep `tini` as entrypoint.
-
-Sketch:
-
-```dockerfile
-RUN apt update && apt install -y supervisor nginx ...
-
-RUN mkdir -p \
-      /home/wall-e/clients \
-      /home/wall-e/services/enabled \
-      /home/wall-e/services/available \
-      /home/wall-e/proxy/sites-enabled \
-      /home/wall-e/logs \
-      /home/wall-e/run \
-    && chown -R wall-e:wall-e /home/wall-e
-
-COPY config/supervisord.conf /etc/supervisor/supervisord.conf
-COPY --chown=wall-e:wall-e config/services/wall-e.conf /home/wall-e/services/enabled/wall-e.conf
-
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
-```
-
-## 10. Permissions and security
-
-- Prefer running client services as `wall-e`.
-- Do not require root for normal service edits.
-- Keep supervisor control socket at `/home/wall-e/run/supervisor.sock` with mode
-  `0700`.
-- Avoid exposing supervisor's HTTP/TCP control interface.
-- Keep public reverse-proxy routes explicit; no automatic exposure of every
-  process listening on localhost.
-- Store per-client secrets in files under `/home/wall-e/clients/<name>/.env` or
-  `/home/wall-e/secrets/<name>.env` with restrictive permissions.
-- Treat any agent able to edit supervisor configs as privileged within the
-  container.
-
-## 11. Observability
-
-Minimum useful commands:
-
-```sh
+supervisorctl reread && supervisorctl update
 supervisorctl status
-supervisorctl tail -f wall-e stderr
-supervisorctl tail -f acme-site stdout
-tail -f ~/logs/acme-site.err.log
+supervisorctl tail -f acme-site stderr
+supervisorctl restart acme-site
+supervisorctl stop acme-site
+mv ~/.config/supervisor.d/acme-site.conf ~/.config/supervisor.d/acme-site.conf.disabled
+supervisorctl reread && supervisorctl update
 ```
 
-Potential future HTTP/admin helpers in `wall-e`:
+## Cloudflare tunnel routing
 
-- `GET /v1/services` → wrapper around `supervisorctl status`
-- `POST /v1/services/{name}/restart`
-- `GET /v1/services/{name}/logs`
+External access comes through a gateway tunnel / Cloudflare process. Cloudflare
+routes to nginx, and nginx routes to project services on loopback high ports.
 
-Do not add these in v1 unless needed; shell access through the agent is enough.
+Do not require in-container TLS, low-port binding, or public Docker port exposure
+for project services.
 
-## 12. Testing plan
+Example `/etc/cloudflared/config.yml` route:
 
-1. Build image.
-2. Run container with existing gateway env vars.
-3. Verify `wall-e` starts under supervisor:
+```yaml
+ingress:
+  - hostname: acme.example.com
+    service: http://127.0.0.1:8080
+  - service: http_status:404
+```
 
-   ```sh
-   supervisorctl status wall-e
-   curl http://localhost:6007/health
-   ```
+## Agent guidance skill
 
-4. Add a toy Node service under `/home/wall-e/clients/hello`.
-5. Add a supervisor snippet under `/home/wall-e/services/enabled/hello.conf`.
-6. Run `supervisorctl reread && supervisorctl update`.
-7. Verify process restart behavior by killing the Node process.
-8. If nginx is included, add a route and verify reload without container restart.
-9. Stop/restart the container and confirm enabled services come back.
+Ship `static/skills/supervisord/SKILL.md` explaining that agent-managed service
+snippets live in `~/.config/supervisor.d/*.conf`, admin services live in
+`/etc/supervisor/conf.d/*.conf`, logs are in `/var/log/wall-e/`, nginx base
+config lives in `/etc/nginx/`, user routes may live in
+`~/.config/nginx/conf.d/*.conf`, and project services bind to loopback high ports.
 
-## 13. Open decisions
+## Dockerfile changes
 
-- Should v1 include nginx, Caddy, or no proxy by default?
-- Should client service definitions live only under `/home/wall-e`, or should the
-  repo ship templates under `static/services/`?
-- Should `wall-e` expose a tiny service-control API later, or should service
-  management remain shell-only through the agent?
-- Should the image grant low-port bind capability, or should all user-space
-  proxies listen on high ports with Docker/host mapping externally?
+Install `supervisor` and `nginx`; create `/etc/supervisor/conf.d`,
+`/home/wall-e/.config/supervisor.d`, `/home/wall-e/.config/nginx/conf.d`,
+`/home/wall-e/sessions`, and `/var/log/wall-e`; ensure `wall-e` can use `/var/run/supervisor.sock` and write
+logs; copy `supervisord.conf`, `wall-e.conf`, and `nginx.conf`; keep `tini` as
+entrypoint; change `CMD` to `supervisord -c /etc/supervisor/supervisord.conf`.
 
-## 14. Recommended v1 scope
+## Safety rules
 
-1. Add `supervisor` and run `wall-e` under it.
-2. Create the user-space directory layout.
-3. Ship a documented example Node service snippet.
-4. Defer proxy choice until a concrete site deployment needs it, or include
-   nginx only if we know the first deployment requires HTTP routing.
-
-This gives the agent durable service-management primitives immediately while
-keeping the change small and reversible.
+- Run project services as `wall-e`.
+- Keep `/var/run/supervisor.sock` mode `0700`.
+- Do not expose supervisor over TCP.
+- Public routes must be explicit in Cloudflare/nginx config.
+- User-writable nginx snippets are trusted config; keep the base include in `/etc/nginx` explicit.

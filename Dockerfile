@@ -19,6 +19,7 @@ RUN apt update && apt install -y \
     lsb-release \
     lsof \
     ncurses-term \
+    nginx \
     openssl \
     pandoc \
     poppler-utils \
@@ -28,6 +29,7 @@ RUN apt update && apt install -y \
     software-properties-common \
     sqlite3 \
     sudo \
+    supervisor \
     tmux \
     unzip \
     zip \
@@ -49,33 +51,54 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 RUN ln -s "$(which fdfind)" /usr/local/bin/fd && \
     ln -s "$(which nvim)" /usr/local/bin/vi
 
+RUN mkdir -p \
+    /etc/supervisor/conf.d \
+    /var/cache/nginx/client_temp \
+    /var/cache/nginx/fastcgi_temp \
+    /var/cache/nginx/proxy_temp \
+    /var/cache/nginx/scgi_temp \
+    /var/cache/nginx/uwsgi_temp \
+    /var/log/wall-e
+
+COPY static/etc/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
+COPY static/etc/supervisor/conf.d/ /etc/supervisor/conf.d/
+COPY static/etc/nginx/nginx.conf /etc/nginx/nginx.conf
+
 RUN deluser --remove-home ubuntu && \
     useradd -ms /bin/bash wall-e && \
-    chown -R wall-e:wall-e /home/wall-e && \
-    mkdir -p /opt/pi /opt/wall-e && chown -R wall-e:wall-e /opt/pi /opt/wall-e && \
-    mkdir -p /home/wall-e/sessions && \
-    chown -R wall-e:wall-e /home/wall-e/sessions && \
+    chown -R wall-e:wall-e /opt && \
     echo "wall-e ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-
-COPY --from=build /usr/local/bin/wall-e /usr/local/bin/wall-e
-COPY --chown=wall-e:wall-e static/SYSTEM.md /opt/wall-e/SYSTEM.md
-COPY --chown=wall-e:wall-e static/www/ /opt/wall-e/www/
-COPY --chown=wall-e:wall-e static/CONTEXT.md /home/wall-e/CONTEXT.md
 
 USER wall-e
 WORKDIR /home/wall-e
 
-COPY --chown=wall-e:wall-e static/.vimrc static/.tmux.conf ./
-RUN mkdir -p .config/nvim && ln -s /home/wall-e/.vimrc .config/nvim/init.vim
+RUN mkdir -p \
+    /home/wall-e/.config/supervisor.d \
+    /home/wall-e/.config/nginx/conf.d \
+    /home/wall-e/.config/nvim \
+    /home/wall-e/sessions \
+    /opt/pi \
+    /opt/wall-e
 
+
+COPY --from=build /usr/local/bin/wall-e /usr/local/bin/wall-e
+
+COPY --chown=wall-e:wall-e --chmod=555 static/.vimrc static/.tmux.conf ./
+COPY --chown=wall-e:wall-e --chmod=555 static/APPEND_SYSTEM.md /opt/pi
+COPY --chown=wall-e:wall-e --chmod=555 static/CONTEXT.md /home/wall-e/CONTEXT.md
+COPY --chown=wall-e:wall-e --chmod=555 static/SYSTEM.md /opt/wall-e/SYSTEM.md
+COPY --chown=wall-e:wall-e --chmod=555 static/skills /opt/pi/skills
+COPY --chown=wall-e:wall-e --chmod=555 static/www/ /opt/wall-e/www/
+
+RUN ln -s /home/wall-e/.vimrc /home/wall-e/.config/nvim/init.vim
+
+ENV HOME=/home/wall-e
 ENV WALLE_SESSION_DIR=/home/wall-e/sessions
 ENV WALLE_SITE=/opt/wall-e/www
 ENV PI_CODING_AGENT_DIR=/opt/pi
 
-COPY --chown=wall-e:wall-e static/APPEND_SYSTEM.md /opt/pi
-COPY --chown=wall-e:wall-e static/skills /opt/pi/skills
-
+USER root
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-CMD ["/usr/local/bin/wall-e"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
