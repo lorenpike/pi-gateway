@@ -19,7 +19,7 @@ not prescribe that layout.
 /etc/supervisor/supervisord.conf          base supervisor config
 /etc/supervisor/conf.d/*.conf             admin-managed programs
 /etc/nginx/                               admin-managed nginx base config
-/etc/cloudflared/                         admin-managed tunnel config, if used
+/usr/local/bin/cloudflared-tunnel         admin-managed tunnel wrapper
 /home/wall-e/.config/supervisor.d/*.conf  user/project service snippets
 /home/wall-e/.config/nginx/conf.d/*.conf  user/project nginx route snippets
 /home/wall-e/sessions/                    wall-e session exports
@@ -147,19 +147,73 @@ supervisorctl reread && supervisorctl update
 
 ## Cloudflare tunnel routing
 
-External access comes through a gateway tunnel / Cloudflare process. Cloudflare
-routes to nginx on `127.0.0.1:80`, and nginx routes to project services on loopback high ports.
+External access comes through a Cloudflare tunnel, supervised by `supervisord`
+as an admin service. Cloudflare routes to nginx on `127.0.0.1:80`, and nginx
+routes to project services on loopback high ports. No in-container TLS,
+low-port binding, or public Docker port exposure is required for project
+services.
 
-Do not require in-container TLS, low-port binding, or public Docker port exposure
-for project services.
+The tunnel runs in token (remotes-managed) mode: routing rules live in the
+Cloudflare dashboard, so no local `/etc/cloudflared/config.yml` is needed in
+v1. The only requirement is that `CLOUDFLARE_TOKEN` is present in the
+container environment.
 
-Example `/etc/cloudflared/config.yml` route:
+### Conditional startup
 
-```yaml
-ingress:
-  - hostname: acme.example.com
-    service: http://127.0.0.1:80
-  - service: http_status:404
+Supervisord `[program]` blocks cannot be conditionally included based on the
+environment, so the cloudflared program always loads but delegates to a
+wrapper that no-ops cleanly when the token is missing:
+
+`/usr/local/bin/cloudflared-tunnel` (copied from
+`static/etc/cloudflared/run-tunnel.sh`):
+
+```sh
+#!/bin/sh
+set -eu
+if [ -z "${CLOUDFLARE_TOKEN:-}" ]; then
+    echo "cloudflared: CLOUDFLARE_TOKEN not set; tunnel disabled." >&2
+    exit 0
+fi
+exec cloudflared tunnel run --token "$CLOUDFLARE_TOKEN"
+```
+
+`/etc/supervisor/conf.d/cloudflared.conf`:
+
+```ini
+[program:cloudflared]
+command=/usr/local/bin/cloudflared-tunnel
+user=wall-e
+autostart=true
+autorestart=unexpected
+exitcodes=0
+startsecs=0
+stopasgroup=true
+killasgroup=true
+stopsignal=TERM
+stdout_logfile=/var/log/wall-e/cloudflared.out.log
+stdout_logfile_maxbytes=0
+stderr_logfile=/var/log/wall-e/cloudflared.err.log
+stderr_logfile_maxbytes=0
+```
+
+`autorestart=unexpected` with `exitcodes=0` plus `startsecs=0` gives the
+desired semantics:
+
+- **No `CLOUDFLARE_TOKEN`:** the wrapper exits `0` immediately. Because `0`
+  is a listed exit code and `autorestart=unexpected` only restarts on
+  *unexpected* exits, supervisord leaves the program `EXITED` (effectively
+  disabled). `startsecs=0` prevents that fast exit from being treated as a
+  failed start.
+- **Token present:** the wrapper `exec`s `cloudflared`, which runs forever.
+  If it crashes (non-zero exit), supervisord restarts it.
+
+At runtime you can still force the tunnel on or off regardless of the env
+var, since it is just another supervised program:
+
+```sh
+supervisorctl status cloudflared
+supervisorctl start cloudflared   # only useful if CLOUDFLARE_TOKEN is set
+supervisorctl stop cloudflared
 ```
 
 ## Agent guidance skill
@@ -175,8 +229,10 @@ config lives in `/etc/nginx/`, user routes may live in
 Install `supervisor` and `nginx`; create `/etc/supervisor/conf.d`,
 `/home/wall-e/.config/supervisor.d`, `/home/wall-e/.config/nginx/conf.d`,
 `/home/wall-e/sessions`, and `/var/log/wall-e`; ensure `wall-e` can use `/var/run/supervisor.sock` and write
-logs; copy `supervisord.conf`, `wall-e.conf`, and `nginx.conf`; keep `tini` as
-entrypoint; change `CMD` to `supervisord -c /etc/supervisor/supervisord.conf`.
+logs; copy `supervisord.conf`, `wall-e.conf`, `nginx.conf`, and
+`cloudflared.conf`; copy `run-tunnel.sh` to `/usr/local/bin/cloudflared-tunnel`
+(mode `0555`); keep `tini` as entrypoint; change `CMD` to
+`supervisord -c /etc/supervisor/supervisord.conf`.
 
 ## Safety rules
 

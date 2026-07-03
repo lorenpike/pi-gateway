@@ -54,6 +54,7 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 		-e OPENAI_API_KEY \
 		-e OPENROUTER_API_KEY \
 		-e BRAVE_API_KEY \
+		-e CLOUDFLARE_TOKEN \
 		-v "./$(BUILD)/auth.json:$(AUTH_FILE)" \
 		-v "./$(BUILD)/pi-settings.json:$(SETTINGS_FILE)" \
 		-v walle--home:/home/$(BOT) \

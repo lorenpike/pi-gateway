@@ -46,6 +46,14 @@ RUN add-apt-repository ppa:neovim-ppa/stable -y \
     && apt update && apt install -y neovim \
     && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p --mode=0755 /usr/share/keyrings \
+    && curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+        | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null \
+    && echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' \
+        | tee /etc/apt/sources.list.d/cloudflared.list \
+    && apt update && apt install -y cloudflared \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 RUN ln -s "$(which fdfind)" /usr/local/bin/fd && \
@@ -64,6 +72,7 @@ COPY static/etc/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
 COPY static/etc/supervisor/conf.d/ /etc/supervisor/conf.d/
 COPY static/etc/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY static/etc/nginx/conf.d/docs.conf /etc/nginx/conf.d/docs.conf
+COPY --chmod=555 static/etc/cloudflared/run-tunnel.sh /usr/local/bin/cloudflared-tunnel
 
 RUN deluser --remove-home ubuntu && \
     useradd -ms /bin/bash wall-e && \
