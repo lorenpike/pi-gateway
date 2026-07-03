@@ -63,6 +63,7 @@ RUN mkdir -p \
 COPY static/etc/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
 COPY static/etc/supervisor/conf.d/ /etc/supervisor/conf.d/
 COPY static/etc/nginx/nginx.conf /etc/nginx/nginx.conf
+COPY static/etc/nginx/conf.d/docs.conf /etc/nginx/conf.d/docs.conf
 
 RUN deluser --remove-home ubuntu && \
     useradd -ms /bin/bash wall-e && \
@@ -89,6 +90,7 @@ COPY --chown=wall-e:wall-e --chmod=555 static/CONTEXT.md /home/wall-e/CONTEXT.md
 COPY --chown=wall-e:wall-e --chmod=555 static/SYSTEM.md /opt/wall-e/SYSTEM.md
 COPY --chown=wall-e:wall-e --chmod=555 static/skills /opt/pi/skills
 COPY --chown=wall-e:wall-e --chmod=555 static/site/ /opt/wall-e/www/
+COPY --chown=root:root --chmod=755 docs/build/html /usr/share/wall-e/docs
 
 RUN ln -s /home/wall-e/.vimrc /home/wall-e/.config/nvim/init.vim
 

@@ -11,11 +11,12 @@ RESET = \e[0m
 
 # VARIABLES
 # -------------------------------------
+DOCS := docs
 BUILD := build
 IMAGE := wall-e
 STATIC_FILES := $(shell find static -type f)
 SRC_FILES := $(shell find src -type f)
-DOCKER_DEPS := $(STATIC_FILES) Dockerfile $(BUILD)/pi-settings.json $(SRC_FILES)
+DOCKER_DEPS := $(STATIC_FILES) Dockerfile $(BUILD)/pi-settings.json $(SRC_FILES) $(DOCS)/build/html/index.html
 HOME := $(or $(HOME),$(USERPROFILE))
 
 BOT := wall-e
@@ -23,6 +24,7 @@ TMUX_SESSION := default
 AUTH_FILE := /opt/pi/auth.json
 SETTINGS_FILE := /opt/pi/settings.json
 WALLE_PORT ?= 6007
+MD_FILES := $(shell find $(DOCS)/source -name '*.md')
 
 # Optionally include environment variables
 -include .env
@@ -56,6 +58,7 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 		-v "./$(BUILD)/pi-settings.json:$(SETTINGS_FILE)" \
 		-v walle--home:/home/$(BOT) \
 		-p $(WALLE_PORT):$(WALLE_PORT) \
+		-p 6080:80 \
 		$(IMAGE)
 
 .PHONY: attach # Attach to container
@@ -96,3 +99,6 @@ $(BUILD)/auth.json: scripts/codex-oauth.py
 $(BUILD)/pi-settings.json: $(HOME)/.pi/agent/settings.json
 	@mkdir -p $(BUILD)
 	@cat ~/.pi/agent/settings.json | jq '{ defaultProvider, defaultModel }' > $@
+
+$(DOCS)/build/html/index.html: $(MD_FILES)
+	@cd $(DOCS) && make clean html

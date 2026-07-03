@@ -15,7 +15,7 @@ Supervisor keeps the gateway and in-container local routing processes alive, and
 | `/etc/supervisor/supervisord.conf` | base supervisor config |
 | `/etc/supervisor/conf.d/*.conf` | admin-managed programs such as `wall-e` and `nginx` |
 | `/home/wall-e/.config/supervisor.d/*.conf` | user/project service snippets |
-| `/etc/nginx/` | admin-managed nginx base config |
+| `/etc/nginx/` | admin-managed nginx base config (listener `0.0.0.0:80`) |
 | `/home/wall-e/.config/nginx/conf.d/*.conf` | user/project nginx route snippets |
 | `/home/wall-e/sessions/` | pi transcript/session exports |
 | `/var/log/wall-e/` | supervisor, nginx, gateway, and project-service logs |
@@ -32,7 +32,7 @@ files = /etc/supervisor/conf.d/*.conf /home/wall-e/.config/supervisor.d/*.conf
 
 `wall-e` is managed by `/etc/supervisor/conf.d/wall-e.conf`. The snippet runs `/usr/local/bin/wall-e` as the `wall-e` user and inherits the container environment. Defaults such as `HOME`, `PI_CODING_AGENT_DIR`, `WALLE_SESSION_DIR`, and `WALLE_SITE` come from Docker `ENV`, not from the supervisor snippet.
 
-`nginx` is managed by `/etc/supervisor/conf.d/nginx.conf` and runs in the foreground under supervisor. Nginx is only an in-container local router; public TLS and external exposure are expected to be handled by a gateway/tunnel such as Cloudflare.
+`nginx` is managed by `/etc/supervisor/conf.d/nginx.conf` and runs in the foreground under supervisor. Nginx is the container's reverse proxy and its only non-loopback listener (`0.0.0.0:80`). It fronts **project services**, which must bind `127.0.0.1` high ports; nginx reaches them over the container's loopback interface. The host (or an upstream gateway such as Cloudflare) reaches nginx via Docker `-p <host-port>:80`. Project services are never bound to `0.0.0.0` and never exposed directly by `-p`.
 
 ## Project services
 
@@ -86,13 +86,12 @@ The admin nginx config under `/etc/nginx/` explicitly includes project route sni
 /home/wall-e/.config/nginx/conf.d/*.conf
 ```
 
-A project route should listen on loopback/high ports only:
+A project route should proxy to a loopback/high-port service only. The snippet
+is included inside the base `server` block, so define `location` blocks, not a
+`server` block:
 
 ```nginx
-server {
-    listen 127.0.0.1:8080;
-    location /acme/ { proxy_pass http://127.0.0.1:3101/; }
-}
+location /acme/ { proxy_pass http://127.0.0.1:3101/; }
 ```
 
 Validate and reload nginx after route changes:
@@ -104,6 +103,7 @@ nginx -t && supervisorctl signal HUP nginx
 ## Safety notes
 
 - Do not expose supervisor over TCP; use the local unix socket only.
-- Keep project services as the `wall-e` user.
-- Keep public routes explicit in Cloudflare/gateway and nginx config.
+- Keep project services as the `wall-e` user and bound to `127.0.0.1` high ports.
+- nginx is the only listener allowed on `0.0.0.0`; everything else stays loopback.
+- Host/gateway exposure is set with Docker `-p <host-port>:80` (optionally behind Cloudflare); never `-p`-publish a project service's own port.
 - Treat user-writable nginx snippets as trusted container-local config.

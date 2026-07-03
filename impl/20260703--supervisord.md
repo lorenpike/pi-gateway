@@ -82,8 +82,9 @@ set with Docker `ENV`, not hardcoded in the supervisor snippet.
 ## Nginx routing
 
 Nginx is the in-container local router. It is supervised by `supervisord`.
-The base config is admin-managed under `/etc/nginx`, and may include
-user/project route snippets from `~/.config/nginx/conf.d/*.conf`. It does not
+The base config is admin-managed under `/etc/nginx`, listens on
+`127.0.0.1:80`, and may include user/project route snippets from
+`~/.config/nginx/conf.d/*.conf` inside its default `server` block. It does not
 terminate public TLS in v1; Cloudflare handles external access.
 
 `/etc/supervisor/conf.d/nginx.conf`:
@@ -101,10 +102,7 @@ stderr_logfile=/var/log/wall-e/nginx.err.log
 Example user route in `~/.config/nginx/conf.d/acme-site.conf`:
 
 ```nginx
-server {
-    listen 127.0.0.1:8080;
-    location /acme/ { proxy_pass http://127.0.0.1:3101/; }
-}
+location /acme/ { proxy_pass http://127.0.0.1:3101/; }
 ```
 
 Reload after routing changes:
@@ -150,7 +148,7 @@ supervisorctl reread && supervisorctl update
 ## Cloudflare tunnel routing
 
 External access comes through a gateway tunnel / Cloudflare process. Cloudflare
-routes to nginx, and nginx routes to project services on loopback high ports.
+routes to nginx on `127.0.0.1:80`, and nginx routes to project services on loopback high ports.
 
 Do not require in-container TLS, low-port binding, or public Docker port exposure
 for project services.
@@ -160,7 +158,7 @@ Example `/etc/cloudflared/config.yml` route:
 ```yaml
 ingress:
   - hostname: acme.example.com
-    service: http://127.0.0.1:8080
+    service: http://127.0.0.1:80
   - service: http_status:404
 ```
 

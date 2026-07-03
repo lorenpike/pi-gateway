@@ -19,3 +19,4 @@ autosectionlabel_prefix_document = True
 html_theme = "furo"
 html_title = "wall-e"
 html_static_path = ["_static"]
+html_logo = "_static/logo.png"
