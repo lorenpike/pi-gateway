@@ -41,6 +41,7 @@ var telegramNativeCommands = []telegramCommand{
 	{TelegramName: "clone", Source: "gateway", Description: "Clone this pi session branch"},
 	{TelegramName: "new", Source: "gateway", Description: "Start a new pi session"},
 	{TelegramName: "compact", Source: "gateway", Description: "Compact this pi session context"},
+	{TelegramName: "abort", Source: "gateway", Description: "Abort the current pi response"},
 }
 
 func newTelegramCommandRegistry(commands []rpc.Command) *telegramCommandRegistry {

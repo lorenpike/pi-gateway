@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"wall-e/pool"
@@ -59,6 +60,8 @@ type TelegramAPI interface {
 	SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (Message, error)
 	// EditMessageText replaces the text of an existing message.
 	EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error
+	// SendChatAction shows Telegram's transient "bot is typing…" indicator.
+	SendChatAction(ctx context.Context, chatID int64, action string) error
 	// SetMyCommands registers the bot's Telegram slash-command menu. Failures
 	// are non-fatal to the bot; Start logs and continues.
 	SetMyCommands(ctx context.Context, commands []BotCommand) error
@@ -102,6 +105,11 @@ type Update struct {
 // We chunk on rune boundaries to stay safe for multi-byte text; see
 // finalizeMessage.
 const TelegramMaxMessageLen = 4096
+
+const (
+	telegramTypingAction   = "typing"
+	telegramTypingInterval = 4 * time.Second
+)
 
 // Config configures the Telegram front-end.
 type Config struct {
@@ -174,6 +182,7 @@ type turnState struct {
 
 	slot       *pool.Slot
 	acquireErr error
+	aborted    atomic.Bool
 }
 
 // NewTelegram builds a Telegram front-end. If api is nil, a real net/http
@@ -377,6 +386,10 @@ func (b *Bot) handleSlashCommand(chatID int64, cmdName, args string) (handled bo
 		return false, ""
 	}
 	args = strings.TrimSpace(args)
+	if cmdName == "abort" {
+		b.handleAbortCommand(chatID)
+		return true, ""
+	}
 	if cmdName == "skill" {
 		if args == "" {
 			_, _ = b.api.SendMessage(b.ctx, chatID, b.commands.skillListText(), 0)
@@ -403,9 +416,43 @@ func (b *Bot) handleSlashCommand(chatID int64, cmdName, args string) (handled bo
 }
 
 func (b *Bot) chatHasActiveTurn(chatID int64) bool {
+	return b.activeTurn(chatID) != nil
+}
+
+func (b *Bot) activeTurn(chatID int64) *turnState {
 	b.turnsMu.Lock()
 	defer b.turnsMu.Unlock()
-	return b.turns[chatID] != nil
+	return b.turns[chatID]
+}
+
+func (b *Bot) handleAbortCommand(chatID int64) {
+	ts := b.activeTurn(chatID)
+	if ts == nil {
+		_, _ = b.api.SendMessage(b.ctx, chatID, "No active pi turn to abort.", 0)
+		return
+	}
+
+	select {
+	case <-ts.slotReady:
+	case <-b.ctx.Done():
+		return
+	}
+	if b.activeTurn(chatID) != ts {
+		_, _ = b.api.SendMessage(b.ctx, chatID, "No active pi turn to abort.", 0)
+		return
+	}
+	if ts.acquireErr != nil || ts.slot == nil {
+		_, _ = b.api.SendMessage(b.ctx, chatID, "No active pi turn to abort.", 0)
+		return
+	}
+
+	ts.aborted.Store(true)
+	resp, err := ts.slot.Client().Abort(b.ctx)
+	if err != nil || !resp.Success {
+		b.sendCommandError(chatID, "abort", resp, err)
+		return
+	}
+	_, _ = b.api.SendMessage(b.ctx, chatID, "Aborted current pi turn.", 0)
 }
 
 func (b *Bot) handleGatewayCommand(chatID int64, cmdName, args string) {
@@ -553,6 +600,9 @@ func (b *Bot) steer(chatID int64, text string, isSlash bool, ts *turnState) (han
 // >4096 chars), and releases the slot. runTurn owns the slot for the turn's
 // lifetime (matching the pool's "slot stays bound until Release").
 func (b *Bot) runTurn(chatID int64, text string, ts *turnState) {
+	stopTyping := b.startTypingIndicator(chatID)
+	defer stopTyping()
+
 	defer close(ts.done)
 	defer func() {
 		b.turnsMu.Lock()
@@ -578,19 +628,50 @@ func (b *Bot) runTurn(chatID int64, text string, ts *turnState) {
 		log.Printf("telegram: prompt chat %d: %v", chatID, err)
 		return
 	}
-	b.streamTurn(chatID, slot)
+	b.streamTurn(chatID, slot, ts, stopTyping)
+}
+
+func (b *Bot) startTypingIndicator(chatID int64) func() {
+	if b.ctx == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(b.ctx)
+	go func() {
+		b.sendTypingAction(ctx, chatID)
+
+		ticker := time.NewTicker(telegramTypingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.sendTypingAction(ctx, chatID)
+			}
+		}
+	}()
+	return cancel
+}
+
+func (b *Bot) sendTypingAction(ctx context.Context, chatID int64) {
+	if err := b.api.SendChatAction(ctx, chatID, telegramTypingAction); err != nil && ctx.Err() == nil {
+		log.Printf("telegram: sendChatAction chat %d: %v", chatID, err)
+	}
 }
 
 // streamTurn consumes the slot's event stream, accumulating text deltas into a
 // buffer and editing a single message in place (throttled to editInterval). On
 // agent_end it finalizes: a final edit (or split into multiple messages if the
 // text exceeds Telegram's 4096-char limit).
-func (b *Bot) streamTurn(chatID int64, slot *pool.Slot) {
+func (b *Bot) streamTurn(chatID int64, slot *pool.Slot, ts *turnState, stopTyping func()) {
 	var buf strings.Builder
 	var msgID int64 // 0 = no message sent yet
 	var lastSent string
 	dirty := false
 	turnDone := false
+	if stopTyping == nil {
+		stopTyping = func() {}
+	}
 
 	ticker := time.NewTicker(b.editInterval)
 	defer ticker.Stop()
@@ -614,6 +695,14 @@ func (b *Bot) streamTurn(chatID int64, slot *pool.Slot) {
 			}
 			idle.Reset(b.idleTimeout)
 		}
+	}
+
+	finalize := func() {
+		stopTyping()
+		if ts != nil && ts.aborted.Load() && msgID == 0 && buf.Len() == 0 {
+			return
+		}
+		b.finalizeMessage(chatID, msgID, buf.String(), lastSent)
 	}
 
 	// flush emits a throttled edit of the current buffer (capped to the
@@ -640,11 +729,12 @@ func (b *Bot) streamTurn(chatID int64, slot *pool.Slot) {
 	for {
 		select {
 		case <-b.ctx.Done():
+			stopTyping()
 			return
 		case ev, ok := <-slot.Events():
 			if !ok {
 				// Stream closed (process died). Finalize with what we have.
-				b.finalizeMessage(chatID, msgID, buf.String(), lastSent)
+				finalize()
 				return
 			}
 			resetIdle()
@@ -664,6 +754,11 @@ func (b *Bot) streamTurn(chatID int64, slot *pool.Slot) {
 							msgID = m.MessageID
 							lastSent = truncateRunes(buf.String(), TelegramMaxMessageLen)
 							dirty = false
+							// Once a visible streaming message exists, stop refreshing
+							// Telegram's transient typing indicator. Edits do not reliably
+							// clear chat actions in every client, so continuing to refresh
+							// can make "typing…" linger after the turn is complete.
+							stopTyping()
 						}
 					}
 				}
@@ -674,11 +769,11 @@ func (b *Bot) streamTurn(chatID int64, slot *pool.Slot) {
 			flush()
 		case <-idleC:
 			log.Printf("telegram: turn idle for %s, finalizing chat %d", b.idleTimeout, chatID)
-			b.finalizeMessage(chatID, msgID, buf.String(), lastSent)
+			finalize()
 			return
 		}
 		if turnDone {
-			b.finalizeMessage(chatID, msgID, buf.String(), lastSent)
+			finalize()
 			return
 		}
 	}

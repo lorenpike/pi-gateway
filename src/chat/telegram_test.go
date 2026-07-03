@@ -5,6 +5,7 @@ package chat
 // network is hit. Tests cover the plan's test list:
 //   - OnMessage_AcquiresAndReplies
 //   - Streaming_EditsSingleMessage (throttled edit-in-place, final text matches)
+//   - TypingActionWhileAgentResponds (Telegram "typing…" chat action)
 //   - MidStreamUserMessage_Steers (NOT a second Acquire)
 //   - Over4096Chars_Splits
 //   - IgnoresSelf
@@ -40,11 +41,17 @@ type editMsg struct {
 	text      string
 }
 
+type chatAction struct {
+	chatID int64
+	action string
+}
+
 type fakeTelegramAPI struct {
 	mu             sync.Mutex
 	me             User
 	sends          []sentMsg
 	edits          []editMsg
+	actions        []chatAction
 	commands       []BotCommand
 	setCommandsErr error
 	updates        chan Update // for GetUpdates (poll-loop test)
@@ -87,6 +94,13 @@ func (a *fakeTelegramAPI) EditMessageText(ctx context.Context, chatID int64, mes
 	return nil
 }
 
+func (a *fakeTelegramAPI) SendChatAction(ctx context.Context, chatID int64, action string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.actions = append(a.actions, chatAction{chatID: chatID, action: action})
+	return nil
+}
+
 func (a *fakeTelegramAPI) SetMyCommands(ctx context.Context, commands []BotCommand) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -103,6 +117,27 @@ func (a *fakeTelegramAPI) editCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.edits)
+}
+func (a *fakeTelegramAPI) actionCount(chatID int64, action string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, got := range a.actions {
+		if got.chatID == chatID && got.action == action {
+			n++
+		}
+	}
+	return n
+}
+func (a *fakeTelegramAPI) waitForAction(chatID int64, action string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if a.actionCount(chatID, action) > 0 {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return a.actionCount(chatID, action) > 0
 }
 func (a *fakeTelegramAPI) lastEditText() string {
 	a.mu.Lock()
@@ -246,6 +281,32 @@ func TestTelegram_OnMessage_AcquiresAndReplies(t *testing.T) {
 	}
 	if finalText != "Hello world" {
 		t.Errorf("final message text = %q, want %q", finalText, "Hello world")
+	}
+}
+
+// TestTelegram_TypingActionWhileAgentResponds: while a turn is active, the bot
+// refreshes Telegram's transient "typing…" chat action.
+func TestTelegram_TypingActionWhileAgentResponds(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	streamDone := make(chan struct{})
+	p, _ := testPool(t, makeScriptedHandler(nil, streamDone))
+	bot := newTestBot(t, p, api)
+
+	done := make(chan struct{})
+	go func() {
+		bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "slow"})
+		close(done)
+	}()
+
+	if !api.waitForAction(42, telegramTypingAction, 2*time.Second) {
+		t.Fatal("sendChatAction typing was not sent while the agent was responding")
+	}
+
+	close(streamDone)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn did not finish after streamDone closed")
 	}
 }
 
@@ -478,7 +539,7 @@ func TestTelegram_StartRegistersPiCommands(t *testing.T) {
 	defer bot.Stop(context.Background())
 
 	cmds := api.registeredCommands()
-	want := map[string]string{"skill": "List skills or run /skill <name> [args]", "name": "Set or clear this pi session name", "session": "Show current pi session info", "clone": "Clone this pi session branch", "new": "Start a new pi session", "compact": "Compact this pi session context", "fix_tests": "Fix failing tests", "hello": "Say hello"}
+	want := map[string]string{"skill": "List skills or run /skill <name> [args]", "name": "Set or clear this pi session name", "session": "Show current pi session info", "clone": "Clone this pi session branch", "new": "Start a new pi session", "compact": "Compact this pi session context", "abort": "Abort the current pi response", "fix_tests": "Fix failing tests", "hello": "Say hello"}
 	if len(cmds) != len(want) {
 		t.Fatalf("registered commands = %v, want %d", cmds, len(want))
 	}
@@ -506,7 +567,7 @@ func TestTelegram_SetMyCommandsFailureNonFatal(t *testing.T) {
 		t.Fatalf("Start should ignore setMyCommands failure: %v", err)
 	}
 	_ = bot.Stop(context.Background())
-	if got := api.registeredCommands(); len(got) != 7 || got[0].Command != "skill" || got[6].Command != "fix_tests" {
+	if got := api.registeredCommands(); len(got) != 8 || got[0].Command != "skill" || got[7].Command != "fix_tests" {
 		t.Errorf("registeredCommands = %v, want native commands plus fix_tests recorded", got)
 	}
 }
@@ -524,6 +585,54 @@ func TestTelegram_GatewayNameCommand(t *testing.T) {
 	}
 	if got := api.lastSendText(); got != "Session name set to: Demo Session" {
 		t.Fatalf("ack = %q, want session-name ack", got)
+	}
+}
+
+func TestTelegram_GatewayAbortNoActiveTurn(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	p, ff := testPool(t, makeScriptedHandler(nil, nil))
+	bot := newTestBot(t, p, api)
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/abort"})
+
+	if got := api.lastSendText(); got != "No active pi turn to abort." {
+		t.Fatalf("/abort no-active ack = %q", got)
+	}
+	if ff.first() != nil {
+		t.Fatalf("/abort with no active turn should not acquire a slot")
+	}
+}
+
+func TestTelegram_GatewayAbortActiveTurn(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	streamDone := make(chan struct{})
+	defer close(streamDone)
+	p, ff := testPool(t, makeScriptedHandler(nil, streamDone))
+	bot := newTestBot(t, p, api)
+
+	done := make(chan struct{})
+	go func() {
+		bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "long turn"})
+		close(done)
+	}()
+
+	fake := ff.waitForFirst(2 * time.Second)
+	if fake == nil || !fake.waitForCommand(`"type":"prompt"`, 2*time.Second) {
+		t.Fatal("first prompt not received")
+	}
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/abort"})
+
+	if !fake.waitForCommand(`"type":"abort"`, 2*time.Second) {
+		t.Fatal("abort command not received")
+	}
+	if got := api.lastSendText(); got != "Aborted current pi turn." {
+		t.Fatalf("/abort ack = %q", got)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn did not finish after abort")
 	}
 }
 
