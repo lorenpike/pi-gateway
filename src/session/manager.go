@@ -77,6 +77,7 @@ const datestampLayout = "20060102T150405Z"
 type SessionFile struct {
 	Key          string    `json:"key"`
 	ChannelType  string    `json:"channelType"`
+	ChannelID    string    `json:"channelId"`
 	Datestamp    string    `json:"datestamp"`
 	CreatedAt    time.Time `json:"createdAt"`
 	ModifiedAt   time.Time `json:"modifiedAt"`
@@ -290,6 +291,7 @@ func (m *Manager) ListSessionFiles() ([]SessionFile, error) {
 		sf := SessionFile{
 			Key:         sessionKey(e.Name()),
 			ChannelType: pf.channelType,
+			ChannelID:   pf.channelID,
 			Datestamp:   pf.datestamp,
 			CreatedAt:   pf.createdAt,
 			ModifiedAt:  info.ModTime().UTC(),

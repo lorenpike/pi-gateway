@@ -1,3 +1,16 @@
+# Fixes path issues for various commands
+ifeq ($(OS),Windows_NT)
+export PATH := /usr/bin;$(PATH)
+endif
+
+# COLORS
+BLUE = \e[1;36m
+GREEN = \e[1;32m
+GRAY = \e[38;5;247m
+RESET = \e[0m
+
+# VARIABLES
+# -------------------------------------
 BUILD := build
 IMAGE := wall-e
 STATIC_FILES := $(shell find static -type f)
@@ -6,10 +19,12 @@ DOCKER_DEPS := $(STATIC_FILES) Dockerfile $(BUILD)/pi-settings.json $(SRC_FILES)
 HOME := $(or $(HOME),$(USERPROFILE))
 
 BOT := wall-e
+TMUX_SESSION := default
 AUTH_FILE := /opt/pi/auth.json
 SETTINGS_FILE := /opt/pi/settings.json
 WALLE_PORT ?= 6007
 
+# Optionally include environment variables
 -include .env
 export
 
@@ -18,7 +33,7 @@ export
 
 .PHONY: help # Show help message
 help:
-	@echo -e '$(BLUE)metrized-cv$(RESET) Makefile$(GRAY)'
+	@echo -e '$(BLUE)wall-e$(RESET) Makefile$(GRAY)'
 	@echo "List of Targets:"
 	@cat $(MAKEFILE_LIST) | grep -E '^.PHONY: [a-zA-Z0-9_-]+ .*# .*$$' \
 		| sed -E 's/.PHONY: ([^ ]+) .*# (.*)/  \1\t\2/' \
@@ -39,9 +54,14 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 		-e BRAVE_API_KEY \
 		-v "./$(BUILD)/auth.json:$(AUTH_FILE)" \
 		-v "./$(BUILD)/pi-settings.json:$(SETTINGS_FILE)" \
-		-v walle--home:/home/wall-e \
+		-v walle--home:/home/$(BOT) \
 		-p $(WALLE_PORT):$(WALLE_PORT) \
 		$(IMAGE)
+
+.PHONY: attach # Attach to container
+attach:
+	@docker exec -it -u wall-e $(IMAGE) tmux new-session -A -s $(TMUX_SESSION)
+
 
 .PHONY: test # Run tests, optionally with -race via RACE=1
 test:

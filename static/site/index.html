@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wall-e</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #fff;
+      --ink: #03045e;
+      --muted: #55707a;
+      --line: #ade8f4;
+      --strong-line: #0096c7;
+      --user: #caf0f8;
+      --assistant: #ade8f4;
+      --accent: #0096c7;
+      --danger: #b00020;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+    }
+
+    button, select, textarea { font: inherit; }
+    button, select, .small, .group-title { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
+    button, select {
+      border: 1px solid var(--strong-line);
+      border-radius: .25rem;
+      background: #fff;
+      color: var(--ink);
+      padding: .5rem .7rem;
+    }
+    button { cursor: pointer; }
+    button:disabled, textarea:disabled { cursor: not-allowed; opacity: .6; }
+    button.primary { background: var(--accent); color: #fff; }
+    select { min-width: 14rem; max-width: 22rem; }
+
+    .app {
+      height: 100vh;
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .topbar {
+      position: relative;
+      width: 100%;
+      padding: .9rem 1.15rem;
+    }
+    .topbar::after {
+      content: "";
+      position: absolute;
+      left: 1rem;
+      right: 1rem;
+      bottom: 0;
+      border-bottom: 1px solid var(--strong-line);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: .7rem;
+    }
+    .logo {
+      width: 2.25rem;
+      height: 2.25rem;
+      display: block;
+    }
+    h1 {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
+      font-size: 2rem;
+      font-weight: 600;
+      line-height: 1;
+    }
+
+    .workspace {
+      min-height: 0;
+      overflow: hidden;
+      display: flex;
+      flex-flow: row wrap;
+      align-items: stretch;
+    }
+
+    .chat {
+      min-width: min(100%, 38rem);
+      flex: 2 1 42rem;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-height: 0;
+      height: 100%;
+    }
+
+    .chat-toolbar {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      flex-wrap: wrap;
+      padding: .8rem 1rem;
+    }
+    .chat-toolbar::after {
+      content: "";
+      position: absolute;
+      left: 1rem;
+      right: 1rem;
+      bottom: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .session-controls { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+    .session-label { font-weight: 800; }
+
+    .history {
+      position: relative;
+      flex: 1 1 24rem;
+      min-width: min(100%, 22rem);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-height: 0;
+      height: 100%;
+    }
+    .history::before {
+      content: "";
+      position: absolute;
+      top: 1rem;
+      bottom: 1rem;
+      left: 0;
+      border-left: 1px solid var(--strong-line);
+    }
+    .history-head {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      padding: .8rem 1rem;
+    }
+    .history-head::after {
+      content: "";
+      position: absolute;
+      left: 1rem;
+      right: 1rem;
+      bottom: 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .messages, .history-list {
+      min-height: 0;
+      overflow: auto;
+    }
+    .messages {
+      padding: 1.2rem clamp(1rem, 2vw, 2rem);
+      display: flex;
+      flex-direction: column;
+      gap: 1.15rem;
+    }
+    .history-list { padding: .85rem 1rem 1rem; }
+
+    .muted { color: var(--muted); }
+    .small { font-size: .85rem; }
+    .error { color: var(--danger); white-space: pre-wrap; }
+    .empty {
+      margin: auto;
+      max-width: 32rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.45;
+    }
+
+    .bubble {
+      width: min(78%, 720px);
+      border-radius: .25rem;
+      border: 1px solid var(--strong-line);
+      padding: 1rem 1.15rem;
+      overflow-wrap: anywhere;
+      line-height: 1.45;
+    }
+    .bubble .who {
+      display: block;
+      margin-bottom: .55rem;
+      font-weight: 800;
+      font-size: .92rem;
+    }
+    .bubble.user { align-self: flex-end; background: var(--user); }
+    .bubble.assistant { align-self: flex-start; background: #fff; border-color: #111; color: #111; }
+    .bubble .content > :first-child { margin-top: 0; }
+    .bubble .content > :last-child { margin-bottom: 0; }
+    .bubble .content pre, .bubble .content code { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .bubble .content pre { overflow: auto; padding: .7rem; background: #f6fbfd; border: 1px solid var(--line); border-radius: .25rem; }
+    .bubble .content blockquote { margin: .5rem 0; padding-left: .8rem; border-left: 3px solid var(--line); color: var(--muted); }
+    .bubble .content a { color: var(--accent); }
+    .bubble.pending .content::after { content: "▋"; animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .composer {
+      position: sticky;
+      bottom: 0;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: .7rem;
+      padding: .9rem 1rem 1rem;
+      background: color-mix(in srgb, var(--bg) 94%, transparent);
+    }
+    .composer::before {
+      content: "";
+      position: absolute;
+      left: 1rem;
+      right: 1rem;
+      top: 0;
+      border-top: 1px solid var(--line);
+    }
+    textarea {
+      min-height: 3rem;
+      max-height: 10rem;
+      border: 1px solid var(--line);
+      border-radius: .25rem;
+      padding: .8rem .9rem;
+      background: #fff;
+      color: var(--ink);
+      resize: none;
+    }
+
+    .group-title {
+      margin: .7rem 0 .45rem;
+      color: var(--muted);
+      font-size: .78rem;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .session-card {
+      display: grid;
+      gap: .35rem;
+      padding: .65rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .session-card .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .5rem;
+    }
+    .session-card button { padding: .3rem .5rem; border-radius: .25rem; }
+
+    @media (max-width: 980px) {
+      .app { height: auto; min-height: 100vh; overflow: visible; }
+      .workspace { display: block; overflow: visible; }
+      .chat { height: calc(100vh - 4.05rem); min-height: 34rem; }
+      .history {
+        height: 32rem;
+        min-height: 28rem;
+      }
+      .history::before {
+        top: 0;
+        bottom: auto;
+        left: 1rem;
+        right: 1rem;
+        border-left: 0;
+        border-top: 1px solid var(--strong-line);
+      }
+      .bubble { width: min(92%, 720px); }
+      select { min-width: 0; width: 100%; }
+      .session-controls { width: 100%; }
+      .session-controls select { flex: 1 1 14rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" src="logo.png" alt="Metrized logo">
+        <h1>wall-e</h1>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="chat" aria-label="Chat">
+        <div class="chat-toolbar">
+          <div>
+            <span class="muted small">Chat id</span>
+            <span id="sessionName" class="session-label"></span>
+          </div>
+          <div class="session-controls">
+            <select id="sessionSelect" title="Previous HTTP chat ids"></select>
+            <button id="newSession" class="primary" type="button" title="New session" aria-label="New session">＋</button>
+          </div>
+        </div>
+
+        <div id="messages" class="messages"></div>
+
+        <form id="composer" class="composer">
+          <textarea id="input" placeholder="Message wall-e…" rows="2"></textarea>
+          <button id="send" class="primary" type="submit" title="Send" aria-label="Send">➤</button>
+        </form>
+      </section>
+
+      <aside class="history" aria-label="Transcript history">
+        <div class="history-head">
+          <div>
+            <strong>Transcripts</strong>
+            <div id="historyStatus" class="muted small">Loading…</div>
+          </div>
+          <button id="refresh" type="button" title="Refresh" aria-label="Refresh">↻</button>
+        </div>
+        <div id="historyList" class="history-list"></div>
+      </aside>
+    </main>
+  </div>
+
+<script>
+const adjectives = [
+  'brave', 'calm', 'clever', 'curious', 'daring', 'eager', 'gentle', 'happy',
+  'lively', 'lucky', 'mellow', 'nimble', 'quiet', 'radiant', 'serene', 'swift',
+  'thoughtful', 'tidy', 'vivid', 'warm', 'wise', 'witty', 'zany', 'zesty'
+];
+const nouns = [
+  'bird', 'bridge', 'button', 'camera', 'cloud', 'garden', 'harbor', 'lantern',
+  'library', 'map', 'meadow', 'moon', 'notebook', 'river', 'robot', 'rocket',
+  'signal', 'sparrow', 'star', 'story', 'sun', 'tree', 'wave', 'window'
+];
+
+const els = {
+  newSession: document.getElementById('newSession'),
+  refresh: document.getElementById('refresh'),
+  sessionName: document.getElementById('sessionName'),
+  sessionSelect: document.getElementById('sessionSelect'),
+  messages: document.getElementById('messages'),
+  composer: document.getElementById('composer'),
+  input: document.getElementById('input'),
+  send: document.getElementById('send'),
+  historyStatus: document.getElementById('historyStatus'),
+  historyList: document.getElementById('historyList'),
+};
+
+let channel = localStorage.getItem('walle.channel') || randomPair();
+let bearerToken = localStorage.getItem('walle.token') || '';
+let busy = false;
+const knownHTTPChannels = new Set(JSON.parse(localStorage.getItem('walle.knownHTTPChannels') || '[]'));
+knownHTTPChannels.add(channel);
+
+function randomPair() {
+  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+  const noun = nouns[Math.floor(Math.random() * nouns.length)];
+  return `${adj}-${noun}`;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderMarkdown(s) {
+  const text = String(s ?? '');
+  if (!window.marked || !window.DOMPurify) return escapeHtml(text).replace(/\n/g, '<br>');
+  marked.setOptions({ breaks: true, gfm: true });
+  return DOMPurify.sanitize(marked.parse(text));
+}
+
+function fmtDate(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
+}
+
+function persistChannels() {
+  localStorage.setItem('walle.channel', channel);
+  localStorage.setItem('walle.knownHTTPChannels', JSON.stringify([...knownHTTPChannels].slice(-100)));
+  els.sessionName.textContent = channel;
+  renderSessionSelect();
+}
+
+function renderSessionSelect() {
+  const values = [...knownHTTPChannels].sort((a, b) => a.localeCompare(b));
+  if (!values.includes(channel)) values.unshift(channel);
+  els.sessionSelect.innerHTML = values.map(v => `<option value="${escapeHtml(v)}"${v === channel ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('');
+}
+
+function setBusy(v) {
+  busy = v;
+  els.send.disabled = v;
+  els.input.disabled = v;
+  els.send.textContent = v ? '…' : '➤';
+}
+
+function clearEmpty() {
+  const empty = els.messages.querySelector('.empty');
+  if (empty) empty.remove();
+}
+
+function scrollMessagesToBottom() {
+  els.messages.scrollTop = els.messages.scrollHeight;
+  requestAnimationFrame(() => { els.messages.scrollTop = els.messages.scrollHeight; });
+}
+
+function renderBubble(bubble) {
+  bubble.querySelector('.content').innerHTML = renderMarkdown(bubble.dataset.raw || '');
+}
+
+function addBubble(role, text = '', pending = false) {
+  clearEmpty();
+  const bubble = document.createElement('div');
+  bubble.className = `bubble ${role}${pending ? ' pending' : ''}`;
+  bubble.dataset.raw = text;
+  bubble.innerHTML = `<span class="who">${role === 'user' ? 'You' : 'wall-e'}</span><div class="content"></div>`;
+  renderBubble(bubble);
+  els.messages.appendChild(bubble);
+  scrollMessagesToBottom();
+  return bubble;
+}
+
+function appendBubbleText(bubble, text) {
+  bubble.dataset.raw = (bubble.dataset.raw || '') + text;
+  renderBubble(bubble);
+  scrollMessagesToBottom();
+}
+
+function bubbleText(bubble) {
+  return bubble.dataset.raw || '';
+}
+
+function promptForToken() {
+  const token = window.prompt('Bearer token required:', bearerToken || '');
+  if (token === null) return null;
+  bearerToken = token.trim();
+  localStorage.setItem('walle.token', bearerToken);
+  return bearerToken;
+}
+
+async function postPrompt(message, allowTokenPrompt) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+  const res = await fetch('/v1/prompt', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ channel, message }),
+  });
+  if (res.status === 401 && allowTokenPrompt) {
+    if (promptForToken() === null) return res;
+    return postPrompt(message, false);
+  }
+  return res;
+}
+
+async function sendMessage(message) {
+  setBusy(true);
+  addBubble('user', message);
+  const reply = addBubble('assistant', '', true);
+  try {
+    const res = await postPrompt(message, true);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}\n${await res.text()}`);
+    await readSSE(res, (event, data) => {
+      if (event === 'delta') {
+        const payload = JSON.parse(data || '{}');
+        appendBubbleText(reply, payload.text || '');
+      } else if (event === 'error') {
+        const payload = JSON.parse(data || '{}');
+        throw new Error(payload.message || 'stream error');
+      }
+    });
+    if (!bubbleText(reply)) appendBubbleText(reply, '(no text response)');
+  } catch (err) {
+    appendBubbleText(reply, `${bubbleText(reply) ? '\n\n' : ''}⚠️ ${err.message || err}`);
+    reply.classList.add('error');
+  } finally {
+    reply.classList.remove('pending');
+    setBusy(false);
+    loadSessions();
+  }
+}
+
+async function readSSE(res, onEvent) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split('\n\n');
+    buf = parts.pop();
+    for (const part of parts) dispatchSSE(part, onEvent);
+  }
+  if (buf.trim()) dispatchSSE(buf, onEvent);
+}
+
+function dispatchSSE(block, onEvent) {
+  let event = 'message';
+  const data = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+  }
+  onEvent(event, data.join('\n'));
+}
+
+async function loadSessions() {
+  els.historyStatus.textContent = 'Loading…';
+  try {
+    const res = await fetch('/v1/sessions');
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}\n${await res.text()}`);
+    const data = await res.json();
+    const sessions = data.sessions || [];
+    for (const s of sessions) {
+      if (s.channelType === 'http' && s.channelId) knownHTTPChannels.add(s.channelId);
+    }
+    persistChannels();
+    renderHistory(sessions);
+  } catch (err) {
+    els.historyStatus.textContent = 'Failed';
+    els.historyList.innerHTML = `<p class="error">${escapeHtml(err.message || err)}</p>`;
+  }
+}
+
+function renderHistory(sessions) {
+  if (!sessions.length) {
+    els.historyStatus.textContent = 'No transcripts yet';
+    els.historyList.innerHTML = '<p class="muted">Send a message to create the first HTTP transcript.</p>';
+    return;
+  }
+  els.historyStatus.textContent = `${sessions.length} transcript${sessions.length === 1 ? '' : 's'}`;
+  const groups = new Map();
+  for (const s of sessions) {
+    const k = s.channelType || 'unknown';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(s);
+  }
+  let html = '';
+  for (const [type, rows] of groups) {
+    html += `<div class="group-title">${escapeHtml(type)}</div>`;
+    for (const s of rows) {
+      const title = s.channelId || s.sessionId || s.datestamp || s.key.slice(0, 8);
+      html += `<article class="session-card">
+        <div class="row"><strong>${escapeHtml(title)}</strong><button data-export="${escapeHtml(s.key)}" type="button" title="View transcript" aria-label="View transcript">↗</button></div>
+        <div class="muted small">${escapeHtml(fmtDate(s.createdAt))}</div>
+        <div class="muted small">${Number(s.messageCount || 0)} messages${s.name ? ' · ' + escapeHtml(s.name) : ''}${s.cwd ? ' · ' + escapeHtml(s.cwd) : ''}</div>
+      </article>`;
+    }
+  }
+  els.historyList.innerHTML = html;
+  els.historyList.querySelectorAll('[data-export]').forEach(btn => {
+    btn.addEventListener('click', () => exportSession(btn.dataset.export));
+  });
+}
+
+async function exportSession(key) {
+  const res = await fetch(`/v1/sessions/${encodeURIComponent(key)}/export.html`);
+  if (!res.ok) {
+    alert(`Export failed: ${res.status} ${res.statusText}\n${await res.text()}`);
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank', 'noopener');
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function resetChatEmpty() {
+  els.messages.innerHTML = '';
+}
+
+els.composer.addEventListener('submit', ev => {
+  ev.preventDefault();
+  const message = els.input.value.trim();
+  if (!message || busy) return;
+  els.input.value = '';
+  sendMessage(message);
+});
+
+els.input.addEventListener('keydown', ev => {
+  if (ev.key === 'Enter' && !ev.shiftKey) {
+    ev.preventDefault();
+    els.composer.requestSubmit();
+  }
+});
+
+els.sessionSelect.addEventListener('change', () => {
+  channel = els.sessionSelect.value;
+  knownHTTPChannels.add(channel);
+  persistChannels();
+  resetChatEmpty();
+});
+
+els.newSession.addEventListener('click', () => {
+  let next = randomPair();
+  for (let i = 0; i < 12 && knownHTTPChannels.has(next); i++) next = randomPair();
+  channel = next;
+  knownHTTPChannels.add(channel);
+  persistChannels();
+  resetChatEmpty();
+  els.input.focus();
+});
+
+els.refresh.addEventListener('click', loadSessions);
+
+persistChannels();
+loadSessions();
+</script>
+</body>
+</html>

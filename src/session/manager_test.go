@@ -266,7 +266,7 @@ func TestManager_NewSessionPath_Uniqueness(t *testing.T) {
 	m := newManager(t)
 	ch := NewChannelID("http", "ch")
 	seen := make(map[string]bool, 100)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		p := m.NewSessionPath(ch)
 		if seen[p] {
 			t.Fatalf("duplicate path generated: %s", p)

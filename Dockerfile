@@ -88,7 +88,7 @@ COPY --chown=wall-e:wall-e --chmod=555 static/APPEND_SYSTEM.md /opt/pi
 COPY --chown=wall-e:wall-e --chmod=555 static/CONTEXT.md /home/wall-e/CONTEXT.md
 COPY --chown=wall-e:wall-e --chmod=555 static/SYSTEM.md /opt/wall-e/SYSTEM.md
 COPY --chown=wall-e:wall-e --chmod=555 static/skills /opt/pi/skills
-COPY --chown=wall-e:wall-e --chmod=555 static/www/ /opt/wall-e/www/
+COPY --chown=wall-e:wall-e --chmod=555 static/site/ /opt/wall-e/www/
 
 RUN ln -s /home/wall-e/.vimrc /home/wall-e/.config/nvim/init.vim
 
