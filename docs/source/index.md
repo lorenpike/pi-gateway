@@ -14,6 +14,7 @@ channels/index
 :caption: Internals
 
 sessions
+supervision
 ```
 
 ## At a glance
@@ -26,7 +27,7 @@ sessions
 ## Running it
 
 ```sh
-make docker            # build + run the gateway container (tini PID 1)
+make docker            # build + run the gateway container (tini PID 1 -> supervisord)
 make stop              # docker stop (graceful drain within WALLE_DRAIN_TIMEOUT)
 ```
 
