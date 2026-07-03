@@ -440,13 +440,19 @@ func (b *Bot) handleGatewayCommand(chatID int64, cmdName, args string) {
 		text := fmt.Sprintf("Session\nID: %s\nName: %s\nMessages: %d\nStreaming: %v", emptyDash(st.SessionID), emptyDash(st.SessionName), st.MessageCount, st.IsStreaming)
 		_, _ = b.api.SendMessage(b.ctx, chatID, text, 0)
 	case "new":
-		resp, st, err := client.NewSession(b.ctx)
+		// Do not use pi's new_session directly here: it generates pi-default
+		// filenames that /v1/sessions intentionally ignores. Switching to a
+		// fresh wall-e path creates the same fresh context while preserving the
+		// typed filename scheme used by the session viewer.
+		newPath := b.pool.NewSessionPath(chID)
+		resp, _, err := client.SwitchSession(b.ctx, newPath)
 		if err != nil || !resp.Success {
 			b.sendCommandError(chatID, "new", resp, err)
 			return
 		}
-		if st.SessionFile != "" {
-			_ = b.pool.ResyncFromState(chID, st.SessionFile)
+		if err := b.pool.ResyncFromState(chID, newPath); err != nil {
+			b.sendCommandError(chatID, "new", rpc.Response{}, err)
+			return
 		}
 		_, _ = b.api.SendMessage(b.ctx, chatID, "Started a new pi session.", 0)
 	case "clone":
@@ -455,8 +461,26 @@ func (b *Bot) handleGatewayCommand(chatID int64, cmdName, args string) {
 			b.sendCommandError(chatID, "clone", resp, err)
 			return
 		}
-		if st.SessionFile != "" {
-			_ = b.pool.ResyncFromState(chID, st.SessionFile)
+		clonePath := b.pool.NewSessionPath(chID)
+		if st.SessionFile == "" {
+			b.sendCommandError(chatID, "clone", rpc.Response{}, errors.New("clone returned empty session file"))
+			return
+		}
+		if err := b.pool.CopySessionFile(st.SessionFile, clonePath); err != nil {
+			b.sendCommandError(chatID, "clone", rpc.Response{}, err)
+			return
+		}
+		resp, _, err = client.SwitchSession(b.ctx, clonePath)
+		if err != nil || !resp.Success {
+			b.sendCommandError(chatID, "clone", resp, err)
+			return
+		}
+		if err := b.pool.ResyncFromState(chID, clonePath); err != nil {
+			b.sendCommandError(chatID, "clone", rpc.Response{}, err)
+			return
+		}
+		if st.SessionFile != clonePath {
+			_ = b.pool.RemoveSessionFile(st.SessionFile)
 		}
 		_, _ = b.api.SendMessage(b.ctx, chatID, "Cloned this pi session branch.", 0)
 	case "compact":

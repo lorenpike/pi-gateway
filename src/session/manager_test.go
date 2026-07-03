@@ -227,6 +227,29 @@ func TestManager_SetCurrent_RejectsDotDot(t *testing.T) {
 	}
 }
 
+func TestManager_CopySessionFile_RequiresPathsInsideSessionDir(t *testing.T) {
+	m := newManager(t)
+	src := filepath.Join(m.SessionDir(), "source.jsonl")
+	dst := filepath.Join(m.SessionDir(), "target.jsonl")
+	if err := os.WriteFile(src, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := m.CopySessionFile(src, dst); err != nil {
+		t.Fatalf("CopySessionFile: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != "hello\n" {
+		t.Fatalf("target contents = %q, want source contents", got)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	if err := m.CopySessionFile(src, outside); err != ErrPathOutsideSessionDir {
+		t.Fatalf("copy outside err = %v, want ErrPathOutsideSessionDir", err)
+	}
+}
+
 // TestManager_ResyncFromState_Empty: empty sessionFile is rejected (mirrors the
 // contract used by the RPC client's GetState).
 func TestManager_ResyncFromState_Empty(t *testing.T) {

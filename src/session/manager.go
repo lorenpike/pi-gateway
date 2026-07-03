@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -148,8 +149,56 @@ func (m *Manager) SetCurrent(ch ChannelID, path string) error {
 		return err
 	}
 	m.mu.Lock()
-	m.current[ch] = path
+	m.current[ch] = m.cleanPath(path)
 	m.mu.Unlock()
+	return nil
+}
+
+// CopySessionFile copies an existing session transcript to targetPath. Both
+// paths must live under SessionDir. The target must not already exist.
+func (m *Manager) CopySessionFile(sourcePath, targetPath string) error {
+	if err := m.validateExistingFile(sourcePath); err != nil {
+		return err
+	}
+	if err := m.validatePath(targetPath); err != nil {
+		return err
+	}
+	src := m.cleanPath(sourcePath)
+	dst := m.cleanPath(targetPath)
+	if src == dst {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("session: open source session: %w", err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("session: create target session: %w", err)
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("session: copy session: %w", copyErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("session: close target session: %w", closeErr)
+	}
+	return nil
+}
+
+// RemoveSessionFile removes a session transcript under SessionDir. Missing
+// files are ignored.
+func (m *Manager) RemoveSessionFile(path string) error {
+	if err := m.validatePath(path); err != nil {
+		return err
+	}
+	if err := os.Remove(m.cleanPath(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("session: remove session: %w", err)
+	}
 	return nil
 }
 
@@ -348,12 +397,39 @@ func (m *Manager) readSessionMetadata(sf *SessionFile) {
 	}
 }
 
-// validatePath ensures path resolves to a location inside SessionDir.
-func (m *Manager) validatePath(path string) error {
+func (m *Manager) cleanPath(path string) string {
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(clean) {
 		clean = filepath.Join(m.cfg.SessionDir, clean)
 	}
+	return clean
+}
+
+func (m *Manager) validateExistingFile(path string) error {
+	resolvedFile, err := filepath.EvalSymlinks(m.cleanPath(path))
+	if err != nil {
+		return fmt.Errorf("session: resolve session file: %w", err)
+	}
+	resolvedDir, err := filepath.EvalSymlinks(m.cfg.SessionDir)
+	if err != nil {
+		resolvedDir = filepath.Clean(m.cfg.SessionDir)
+	}
+	rel, err := filepath.Rel(resolvedDir, resolvedFile)
+	if err != nil {
+		return ErrPathOutsideSessionDir
+	}
+	if rel == "." || rel == "" {
+		return nil
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return ErrPathOutsideSessionDir
+	}
+	return nil
+}
+
+// validatePath ensures path resolves to a location inside SessionDir.
+func (m *Manager) validatePath(path string) error {
+	clean := m.cleanPath(path)
 	parent := filepath.Dir(clean)
 	resolvedParent, err := filepath.EvalSymlinks(parent)
 	if err != nil {

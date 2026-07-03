@@ -469,6 +469,23 @@ func (p *Pool) broadcastIdle() {
 	p.mu.Unlock()
 }
 
+// NewSessionPath returns a fresh wall-e typed session path for channel without
+// storing it as current.
+func (p *Pool) NewSessionPath(channel ChannelID) string {
+	return p.cfg.Sessions.NewSessionPath(channel)
+}
+
+// CopySessionFile copies an existing transcript to targetPath. Both paths must
+// live under the configured session dir.
+func (p *Pool) CopySessionFile(sourcePath, targetPath string) error {
+	return p.cfg.Sessions.CopySessionFile(sourcePath, targetPath)
+}
+
+// RemoveSessionFile removes a transcript under the configured session dir.
+func (p *Pool) RemoveSessionFile(path string) error {
+	return p.cfg.Sessions.RemoveSessionFile(path)
+}
+
 // ResyncFromState updates the session manager's current file for channel after
 // a session-mutating RPC command such as new_session or clone.
 func (p *Pool) ResyncFromState(channel ChannelID, sessionFile string) error {

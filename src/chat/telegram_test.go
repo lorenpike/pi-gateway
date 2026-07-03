@@ -14,6 +14,8 @@ package chat
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -143,6 +145,12 @@ func (a *fakeTelegramAPI) registeredCommands() []BotCommand {
 // testPool builds a real pool backed by the fake factory + a per-slot handler.
 func testPool(t *testing.T, handler func(f *fakePI, cmd map[string]any)) (*pool.Pool, *fakeFactory) {
 	t.Helper()
+	p, ff, _ := testPoolWithManager(t, handler)
+	return p, ff
+}
+
+func testPoolWithManager(t *testing.T, handler func(f *fakePI, cmd map[string]any)) (*pool.Pool, *fakeFactory, *session.Manager) {
+	t.Helper()
 	dir := t.TempDir()
 	sm, err := session.New(session.Config{SessionDir: dir})
 	if err != nil {
@@ -175,7 +183,7 @@ func testPool(t *testing.T, handler func(f *fakePI, cmd map[string]any)) (*pool.
 		_ = p.Shutdown(context.Background())
 		ff.closeAll()
 	})
-	return p, ff
+	return p, ff, sm
 }
 
 // newTestBot builds a Bot wired for direct handleMessage calls (no Start/poll).
@@ -516,6 +524,88 @@ func TestTelegram_GatewayNameCommand(t *testing.T) {
 	}
 	if got := api.lastSendText(); got != "Session name set to: Demo Session" {
 		t.Fatalf("ack = %q, want session-name ack", got)
+	}
+}
+
+func TestTelegram_GatewayNewUsesTypedSessionPath(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	var current string
+	handler := func(f *fakePI, cmd map[string]any) {
+		id, _ := cmd["id"].(string)
+		switch cmd["type"] {
+		case "switch_session":
+			current, _ = cmd["sessionPath"].(string)
+			f.writeResp(id, "switch_session", true)
+		case "get_state":
+			f.writeJSON(map[string]any{"type": "response", "command": "get_state", "success": true, "id": id, "data": map[string]any{"sessionFile": current}})
+		}
+	}
+	p, ff, sm := testPoolWithManager(t, handler)
+	bot := newTestBot(t, p, api)
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/new"})
+
+	fake := ff.first()
+	if fake == nil || fake.contains(`"type":"new_session"`) {
+		t.Fatalf("/new should use switch_session, not new_session; got %v", fake)
+	}
+	if got := fake.count(`"type":"switch_session"`); got != 2 {
+		t.Fatalf("switch_session count = %d, want initial acquire + /new", got)
+	}
+	cur, ok := sm.Current(session.NewChannelID("telegram", "42"))
+	if !ok || !strings.HasPrefix(filepath.Base(cur), "telegram--42--") {
+		t.Fatalf("current session = %q ok=%v, want typed telegram path", cur, ok)
+	}
+	if got := api.lastSendText(); got != "Started a new pi session." {
+		t.Fatalf("ack = %q", got)
+	}
+}
+
+func TestTelegram_GatewayCloneRetargetsToTypedSessionPath(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	var sm *session.Manager
+	var current string
+	cloneSourceName := "2026-07-02T15-30-12-000Z_clone-session.jsonl"
+	handler := func(f *fakePI, cmd map[string]any) {
+		id, _ := cmd["id"].(string)
+		switch cmd["type"] {
+		case "switch_session":
+			current, _ = cmd["sessionPath"].(string)
+			f.writeResp(id, "switch_session", true)
+		case "clone":
+			current = filepath.Join(sm.SessionDir(), cloneSourceName)
+			body := `{"type":"session","version":3,"id":"cloned","timestamp":"2026-07-02T15:30:12Z","cwd":"/work"}` + "\n"
+			if err := os.WriteFile(current, []byte(body), 0o644); err != nil {
+				t.Errorf("write clone source: %v", err)
+			}
+			f.writeResp(id, "clone", true)
+		case "get_state":
+			f.writeJSON(map[string]any{"type": "response", "command": "get_state", "success": true, "id": id, "data": map[string]any{"sessionFile": current}})
+		}
+	}
+	var p *pool.Pool
+	var ff *fakeFactory
+	p, ff, sm = testPoolWithManager(t, handler)
+	bot := newTestBot(t, p, api)
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "/clone"})
+
+	cur, ok := sm.Current(session.NewChannelID("telegram", "42"))
+	if !ok || !strings.HasPrefix(filepath.Base(cur), "telegram--42--") {
+		t.Fatalf("current session = %q ok=%v, want typed telegram path", cur, ok)
+	}
+	if _, err := os.Stat(cur); err != nil {
+		t.Fatalf("typed clone file was not copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sm.SessionDir(), cloneSourceName)); !os.IsNotExist(err) {
+		t.Fatalf("clone source should be removed after retarget, stat err=%v", err)
+	}
+	fake := ff.first()
+	if fake == nil || fake.count(`"type":"switch_session"`) != 2 {
+		t.Fatalf("clone should switch to initial and retarget paths; got %v", fake)
+	}
+	if got := api.lastSendText(); got != "Cloned this pi session branch." {
+		t.Fatalf("ack = %q", got)
 	}
 }
 
