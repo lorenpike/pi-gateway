@@ -88,6 +88,16 @@ type SessionFile struct {
 	Path         string    `json:"-"`
 }
 
+// TranscriptMessage is one chat-visible message read from a persisted pi
+// transcript. Content is flattened to display text for lightweight clients.
+type TranscriptMessage struct {
+	ID        string `json:"id,omitempty"`
+	ParentID  string `json:"parentId,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+}
+
 type parsedFilename struct {
 	channelType string
 	channelID   string
@@ -328,6 +338,113 @@ func (m *Manager) ResolveSessionKey(key string) (SessionFile, bool, error) {
 		}
 	}
 	return SessionFile{}, false, nil
+}
+
+// ReadTranscriptMessages reads chat-visible messages from an existing
+// transcript file under SessionDir. It understands the common pi JSONL shape:
+// {"type":"message","message":{"role":"user|assistant","content":...}}
+// and flattens string/content-block payloads to text for web clients.
+func (m *Manager) ReadTranscriptMessages(path string) ([]TranscriptMessage, error) {
+	if err := m.validateExistingFile(path); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(m.cleanPath(path))
+	if err != nil {
+		return nil, fmt.Errorf("session: open transcript: %w", err)
+	}
+	defer f.Close()
+
+	var out []TranscriptMessage
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var row struct {
+			Type      string  `json:"type"`
+			ID        string  `json:"id"`
+			ParentID  *string `json:"parentId"`
+			Timestamp string  `json:"timestamp"`
+			Message   struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil || row.Type != "message" || (row.Message.Role != "user" && row.Message.Role != "assistant") {
+			continue
+		}
+		msg := TranscriptMessage{
+			ID:        row.ID,
+			Timestamp: row.Timestamp,
+			Role:      row.Message.Role,
+			Content:   transcriptContentText(row.Message.Content),
+		}
+		if row.ParentID != nil {
+			msg.ParentID = *row.ParentID
+		}
+		out = append(out, msg)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("session: scan transcript: %w", err)
+	}
+	return out, nil
+}
+
+func transcriptContentText(raw json.RawMessage) string {
+	return transcriptContentTextDepth(raw, 0)
+}
+
+func transcriptContentTextDepth(raw json.RawMessage, depth int) string {
+	if depth > 8 {
+		return ""
+	}
+	raw = json.RawMessage(strings.TrimSpace(string(raw)))
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		parts := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			if text := transcriptContentTextDepth(b, depth+1); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	for _, k := range []string{"text", "content"} {
+		if v, ok := obj[k]; ok {
+			if text := transcriptContentTextDepth(v, depth+1); text != "" {
+				return text
+			}
+		}
+	}
+	var typ string
+	_ = json.Unmarshal(obj["type"], &typ)
+	switch typ {
+	case "image", "input_image":
+		return "[image]"
+	case "tool_use", "tool_call":
+		var name string
+		_ = json.Unmarshal(obj["name"], &name)
+		if name != "" {
+			return "[tool: " + name + "]"
+		}
+		return "[tool]"
+	case "tool_result":
+		return "[tool result]"
+	}
+	return ""
 }
 
 func parseSessionFilename(name string) (parsedFilename, bool) {

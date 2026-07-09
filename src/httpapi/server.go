@@ -110,7 +110,7 @@ func New(cfg Config, p *pool.Pool) *Server {
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/v1/prompt", s.handlePrompt)
 	s.mux.HandleFunc("/v1/sessions", s.handleSessions)
-	s.mux.HandleFunc("/v1/sessions/", s.handleSessionExport)
+	s.mux.HandleFunc("/v1/sessions/", s.handleSessionDetail)
 	if cfg.SiteDir != "" {
 		s.mux.Handle("/", http.FileServer(http.Dir(cfg.SiteDir)))
 	}
@@ -199,20 +199,20 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"sessions": sessions})
 }
 
-func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		writeJSONError(w, 405, "method not allowed")
 		return
 	}
 	const prefix = "/v1/sessions/"
-	if !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, "/export.html") {
+	if !strings.HasPrefix(r.URL.Path, prefix) {
 		http.NotFound(w, r)
 		return
 	}
-	key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/export.html")
-	key = strings.Trim(key, "/")
-	if key == "" || strings.Contains(key, "/") {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	key, action, ok := strings.Cut(rest, "/")
+	if !ok || key == "" || strings.Contains(key, "/") {
 		http.NotFound(w, r)
 		return
 	}
@@ -220,15 +220,35 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 404, "sessions unavailable")
 		return
 	}
-	sf, ok, err := s.cfg.Sessions.ResolveSessionKey(key)
+	sf, found, err := s.cfg.Sessions.ResolveSessionKey(key)
 	if err != nil {
 		writeJSONError(w, 500, fmt.Sprintf("resolve session failed: %v", err))
 		return
 	}
-	if !ok {
+	if !found {
 		http.NotFound(w, r)
 		return
 	}
+	switch action {
+	case "export.html":
+		s.handleSessionExport(w, r, sf)
+	case "messages":
+		s.handleSessionMessages(w, r, sf)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request, sf session.SessionFile) {
+	messages, err := s.cfg.Sessions.ReadTranscriptMessages(sf.Path)
+	if err != nil {
+		writeJSONError(w, 500, fmt.Sprintf("read session messages failed: %v", err))
+		return
+	}
+	writeJSON(w, 200, map[string]any{"session": sf, "messages": messages})
+}
+
+func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request, sf session.SessionFile) {
 	tmp, err := os.CreateTemp("", "walle-session-*.html")
 	if err != nil {
 		writeJSONError(w, 500, fmt.Sprintf("create temp file failed: %v", err))

@@ -22,6 +22,14 @@ No auth. Serves the static read-only session UI from `WALLE_SITE`.
 
 No auth. Returns all typed session files grouped-friendly for the UI. The response omits raw channel ids and uuids.
 
+### `GET /v1/sessions/{key}/messages`
+
+No auth. Returns the selected transcript's chat-visible messages as JSON for the web UI:
+
+```json
+{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}
+```
+
 ### `GET /v1/sessions/{key}/export.html`
 
 No auth. Exports the selected session via pi's `export_html` RPC command into a temporary file and returns it as `text/html`.

@@ -269,7 +269,8 @@ func TestSessions_ListAndExport_NoAuth(t *testing.T) {
 	body := strings.Join([]string{
 		`{"type":"session","version":3,"id":"sid-1","timestamp":"2026-07-02T15:30:12Z","cwd":"/home/wall-e"}`,
 		`{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-02T15:30:13Z","message":{"role":"user","content":"hi"}}`,
-		`{"type":"session_info","id":"i1","parentId":"m1","timestamp":"2026-07-02T15:30:14Z","name":"Smoke test"}`,
+		`{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-07-02T15:30:14Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`,
+		`{"type":"session_info","id":"i1","parentId":"m1","timestamp":"2026-07-02T15:30:15Z","name":"Smoke test"}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write session: %v", err)
@@ -295,8 +296,26 @@ func TestSessions_ListAndExport_NoAuth(t *testing.T) {
 	if len(got.Sessions) != 1 {
 		t.Fatalf("sessions = %v, want 1", got.Sessions)
 	}
-	if got.Sessions[0].ChannelType != "http" || got.Sessions[0].Datestamp != "20260702T153012Z" || got.Sessions[0].Name != "Smoke test" || got.Sessions[0].MessageCount != 1 {
+	if got.Sessions[0].ChannelType != "http" || got.Sessions[0].Datestamp != "20260702T153012Z" || got.Sessions[0].Name != "Smoke test" || got.Sessions[0].MessageCount != 2 {
 		t.Fatalf("session metadata = %+v", got.Sessions[0])
+	}
+
+	messagesPath := "/v1/sessions/" + got.Sessions[0].Key + "/messages"
+	rr = do(t, s, http.MethodGet, messagesPath, "", "")
+	if rr.Code != 200 {
+		t.Fatalf("messages status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	var msgResp struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &msgResp); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(msgResp.Messages) != 2 || msgResp.Messages[0].Role != "user" || msgResp.Messages[0].Content != "hi" || msgResp.Messages[1].Role != "assistant" || msgResp.Messages[1].Content != "hello" {
+		t.Fatalf("messages = %+v, want user hi and assistant hello", msgResp.Messages)
 	}
 
 	exportPath := "/v1/sessions/" + got.Sessions[0].Key + "/export.html"

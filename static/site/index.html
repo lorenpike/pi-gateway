@@ -347,6 +347,8 @@ const els = {
 let channel = localStorage.getItem('walle.channel') || randomPair();
 let bearerToken = localStorage.getItem('walle.token') || '';
 let busy = false;
+let sessionByHTTPChannel = new Map();
+let conversationLoadSeq = 0;
 const knownHTTPChannels = new Set(JSON.parse(localStorage.getItem('walle.knownHTTPChannels') || '[]'));
 knownHTTPChannels.add(channel);
 
@@ -380,8 +382,19 @@ function persistChannels() {
   renderSessionSelect();
 }
 
+function sessionRecency(s) {
+  if (!s) return 0;
+  const d = new Date(s.modifiedAt || s.createdAt || 0);
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
 function renderSessionSelect() {
-  const values = [...knownHTTPChannels].sort((a, b) => a.localeCompare(b));
+  const values = [...knownHTTPChannels].sort((a, b) => {
+    const ra = sessionRecency(sessionByHTTPChannel.get(a));
+    const rb = sessionRecency(sessionByHTTPChannel.get(b));
+    if (ra !== rb) return rb - ra;
+    return a.localeCompare(b);
+  });
   if (!values.includes(channel)) values.unshift(channel);
   els.sessionSelect.innerHTML = values.map(v => `<option value="${escapeHtml(v)}"${v === channel ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('');
 }
@@ -407,12 +420,22 @@ function renderBubble(bubble) {
   bubble.querySelector('.content').innerHTML = renderMarkdown(bubble.dataset.raw || '');
 }
 
+function roleClass(role) {
+  return role === 'user' ? 'user' : 'assistant';
+}
+
+function roleLabel(role) {
+  if (role === 'user') return 'You';
+  if (role === 'assistant') return 'wall-e';
+  return role || 'message';
+}
+
 function addBubble(role, text = '', pending = false) {
   clearEmpty();
   const bubble = document.createElement('div');
-  bubble.className = `bubble ${role}${pending ? ' pending' : ''}`;
+  bubble.className = `bubble ${roleClass(role)}${pending ? ' pending' : ''}`;
   bubble.dataset.raw = text;
-  bubble.innerHTML = `<span class="who">${role === 'user' ? 'You' : 'wall-e'}</span><div class="content"></div>`;
+  bubble.innerHTML = `<span class="who">${escapeHtml(roleLabel(role))}</span><div class="content"></div>`;
   renderBubble(bubble);
   els.messages.appendChild(bubble);
   scrollMessagesToBottom();
@@ -453,6 +476,7 @@ async function postPrompt(message, allowTokenPrompt) {
 }
 
 async function sendMessage(message) {
+  conversationLoadSeq++; // invalidate any in-flight transcript load before streaming into live DOM nodes
   setBusy(true);
   addBubble('user', message);
   const reply = addBubble('assistant', '', true);
@@ -475,7 +499,7 @@ async function sendMessage(message) {
   } finally {
     reply.classList.remove('pending');
     setBusy(false);
-    loadSessions();
+    loadSessions(false);
   }
 }
 
@@ -504,22 +528,72 @@ function dispatchSSE(block, onEvent) {
   onEvent(event, data.join('\n'));
 }
 
-async function loadSessions() {
+async function loadSessions(loadCurrent = true) {
   els.historyStatus.textContent = 'Loading…';
   try {
     const res = await fetch('/v1/sessions');
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}\n${await res.text()}`);
     const data = await res.json();
     const sessions = data.sessions || [];
+    rebuildSessionIndex(sessions);
     for (const s of sessions) {
       if (s.channelType === 'http' && s.channelId) knownHTTPChannels.add(s.channelId);
     }
     persistChannels();
     renderHistory(sessions);
+    if (loadCurrent && !busy) loadConversationForChannel();
   } catch (err) {
     els.historyStatus.textContent = 'Failed';
     els.historyList.innerHTML = `<p class="error">${escapeHtml(err.message || err)}</p>`;
   }
+}
+
+function rebuildSessionIndex(sessions) {
+  sessionByHTTPChannel = new Map();
+  for (const s of sessions) {
+    if (s.channelType !== 'http' || !s.channelId) continue;
+    const prev = sessionByHTTPChannel.get(s.channelId);
+    if (!prev || new Date(s.createdAt) > new Date(prev.createdAt)) sessionByHTTPChannel.set(s.channelId, s);
+  }
+}
+
+async function loadConversationForChannel() {
+  const loadId = ++conversationLoadSeq;
+  const activeChannel = channel;
+  const session = sessionByHTTPChannel.get(activeChannel);
+  if (!session) {
+    resetChatEmpty('No messages yet. Send a message to start this conversation.');
+    return;
+  }
+  resetChatEmpty('Loading conversation…');
+  try {
+    const res = await fetch(`/v1/sessions/${encodeURIComponent(session.key)}/messages`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}\n${await res.text()}`);
+    const data = await res.json();
+    if (loadId !== conversationLoadSeq || activeChannel !== channel) return;
+    renderConversation(data.messages || []);
+  } catch (err) {
+    if (loadId !== conversationLoadSeq || activeChannel !== channel) return;
+    els.messages.innerHTML = `<p class="error">${escapeHtml(err.message || err)}</p>`;
+  }
+}
+
+function isChatMessage(m) {
+  if (m.role !== 'user' && m.role !== 'assistant') return false;
+  const text = String(m.content || '').trim();
+  if (!text) return false;
+  if (/^\[(tool|tool result|image)(:|\])/.test(text)) return false;
+  return true;
+}
+
+function renderConversation(messages) {
+  els.messages.innerHTML = '';
+  const chatMessages = messages.filter(isChatMessage);
+  if (!chatMessages.length) {
+    resetChatEmpty('No chat messages yet.');
+    return;
+  }
+  for (const m of chatMessages) addBubble(m.role, m.content || '');
 }
 
 function renderHistory(sessions) {
@@ -565,8 +639,8 @@ async function exportSession(key) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-function resetChatEmpty() {
-  els.messages.innerHTML = '';
+function resetChatEmpty(message = '') {
+  els.messages.innerHTML = message ? `<p class="empty">${escapeHtml(message)}</p>` : '';
 }
 
 els.composer.addEventListener('submit', ev => {
@@ -588,7 +662,7 @@ els.sessionSelect.addEventListener('change', () => {
   channel = els.sessionSelect.value;
   knownHTTPChannels.add(channel);
   persistChannels();
-  resetChatEmpty();
+  loadConversationForChannel();
 });
 
 els.newSession.addEventListener('click', () => {
@@ -597,11 +671,12 @@ els.newSession.addEventListener('click', () => {
   channel = next;
   knownHTTPChannels.add(channel);
   persistChannels();
-  resetChatEmpty();
+  conversationLoadSeq++;
+  resetChatEmpty('No messages yet. Send a message to start this conversation.');
   els.input.focus();
 });
 
-els.refresh.addEventListener('click', loadSessions);
+els.refresh.addEventListener('click', () => loadSessions());
 
 persistChannels();
 loadSessions();
