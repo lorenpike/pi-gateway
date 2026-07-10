@@ -15,7 +15,7 @@ this is still here, please delete this section.
 
 # User
 
-- name {{ Their name }}
+- name: {{ Their name }}
 - position: {{ Their position }}
 - email: {{ Their email }}
 - description: {{ A brief description of the user, e.g. their role, responsibilities, etc. }}

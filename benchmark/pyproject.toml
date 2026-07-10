@@ -1,0 +1,16 @@
+[project]
+name = "walle-bench"
+version = "0.1.0"
+description = "Benchmark harness for wall-e agent behavior"
+requires-python = ">=3.11"
+dependencies = ["requests", "rich"]
+
+[project.optional-dependencies]
+dev = ["ruff", "pyinstrument" ]
+
+[tool.ruff]
+line-length = 88
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
