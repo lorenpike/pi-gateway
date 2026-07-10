@@ -45,8 +45,10 @@ help:
 .PHONY: docker # Build and run container
 docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 	-@docker rm -f $(IMAGE) 2>/dev/null
+	# -e CLOUDFLARE_TOKEN
 	@docker run -d \
 		--name $(IMAGE) \
+		-e TZ \
 		-e WALLE_TOKEN \
 		-e WALLE_PORT \
 		-e WALLE_TELEGRAM_TOKEN \
@@ -54,7 +56,6 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 		-e OPENAI_API_KEY \
 		-e OPENROUTER_API_KEY \
 		-e BRAVE_API_KEY \
-		-e CLOUDFLARE_TOKEN \
 		-v "./$(BUILD)/auth.json:$(AUTH_FILE)" \
 		-v "./$(BUILD)/pi-settings.json:$(SETTINGS_FILE)" \
 		-v walle--home:/home/$(BOT) \

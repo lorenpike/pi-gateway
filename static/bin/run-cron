@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+install -d -o wall-e -g wall-e -m 0755 /var/log/wall-e/cron
+install -d -o wall-e -g wall-e -m 0700 \
+    /home/wall-e/.config/cron \
+    /home/wall-e/.local/state/cron/locks
+
+if [ -f /home/wall-e/.config/cron/crontab ]; then
+    chown wall-e:wall-e /home/wall-e/.config/cron/crontab
+    chmod 600 /home/wall-e/.config/cron/crontab
+    if ! su -s /bin/sh wall-e -c 'crontab /home/wall-e/.config/cron/crontab'; then
+        echo 'run-cron: failed to install /home/wall-e/.config/cron/crontab; starting cron anyway' >&2
+    fi
+fi
+
+rm -f /var/run/crond.pid /run/crond.pid
+exec /usr/sbin/cron -f -L 15

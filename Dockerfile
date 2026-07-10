@@ -8,6 +8,7 @@ FROM ubuntu:24.04
 RUN apt update && apt install -y \
     build-essential \
     ca-certificates \
+    cron \
     curl \
     fd-find \
     gh \
@@ -31,6 +32,7 @@ RUN apt update && apt install -y \
     sudo \
     supervisor \
     tmux \
+    tree \
     unzip \
     zip \
     && rm -rf /var/lib/apt/lists/*
@@ -73,10 +75,12 @@ COPY static/etc/supervisor/conf.d/ /etc/supervisor/conf.d/
 COPY static/etc/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY static/etc/nginx/conf.d/docs.conf /etc/nginx/conf.d/docs.conf
 COPY --chmod=555 static/etc/cloudflared/run-tunnel.sh /usr/local/bin/cloudflared-tunnel
+COPY --chmod=555 static/bin/run-cron /usr/local/bin/run-cron
 
 RUN deluser --remove-home ubuntu && \
     useradd -ms /bin/bash wall-e && \
-    chown -R wall-e:wall-e /opt && \
+    mkdir -p /var/log/wall-e/cron && \
+    chown -R wall-e:wall-e /opt /var/log/wall-e/cron && \
     echo "wall-e ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 USER wall-e
@@ -85,7 +89,9 @@ WORKDIR /home/wall-e
 RUN mkdir -p \
     /home/wall-e/.config/supervisor.d \
     /home/wall-e/.config/nginx/conf.d \
+    /home/wall-e/.config/cron \
     /home/wall-e/.config/nvim \
+    /home/wall-e/.local/state/cron/locks \
     /home/wall-e/sessions \
     /opt/pi \
     /opt/wall-e

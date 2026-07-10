@@ -15,6 +15,7 @@ channels/index
 
 sessions
 supervision
+cron
 ```
 
 ## At a glance
