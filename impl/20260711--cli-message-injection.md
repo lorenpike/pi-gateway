@@ -59,6 +59,22 @@ behavior.
 chat delivery adapter; results are visible through the session/debug UI and the
 CLI stream.
 
+## Current channel environment
+
+Each `pi` process/session should know its bound channel through environment
+variables set by the gateway before spawning the process:
+
+```sh
+WALLE_CHANNEL=telegram:123456789
+WALLE_CHANNEL_TYPE=telegram
+WALLE_CHANNEL_ID=123456789
+```
+
+The system prompt should tell the model how to discover the current channel,
+e.g. `echo $WALLE_CHANNEL`. This lets a user say "schedule this for this chat"
+and the agent can create cron jobs targeting the current channel without asking
+for a raw chat id.
+
 ## Prompt visibility
 
 Injected prompts must be written into the pi session transcript as user
@@ -146,13 +162,18 @@ stream ending before completion.
    - Reuse most recent session via existing session manager/pool behavior.
    - Support `http` first.
 
-4. **Telegram adapter**
+4. **Channel env injection**
+   - Set `WALLE_CHANNEL`, `WALLE_CHANNEL_TYPE`, and `WALLE_CHANNEL_ID` for the
+     spawned/bound `pi` process.
+   - Update `SYSTEM.md` to mention `echo $WALLE_CHANNEL`.
+
+5. **Telegram adapter**
    - Extract reusable Telegram response delivery from inbound message handling.
    - Add injection support that records the user prompt in session and sends
      only the assistant response to Telegram.
    - Respect Telegram allowed-chat config.
 
-5. **Docs/skills/system prompt**
+6. **Docs/skills/system prompt**
    - Document heredoc/file/pipe usage.
    - Add cron examples.
    - Add skill/system guidance recommending explicit scheduled-task context when
