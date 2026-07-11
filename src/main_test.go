@@ -10,12 +10,16 @@ package main
 // without the pi binary.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,8 +49,8 @@ func freePort(t *testing.T) int {
 func clearWalleEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		"WALLE_TOKEN", "WALLE_PORT", "WALLE_HTTP_QUEUE_TIMEOUT",
-		"WALLE_SITE", "WALLE_SESSION_EXPORT_TIMEOUT",
+		"WALLE_TOKEN", "WALLE_PORT", "WALLE_MSG_TIMEOUT",
+		"WALLE_HTTP_QUEUE_TIMEOUT", "WALLE_SITE", "WALLE_SESSION_EXPORT_TIMEOUT",
 		"WALLE_POOL_SIZE", "WALLE_DRAIN_TIMEOUT", "WALLE_SESSION_DIR",
 		"WALLE_PI_BIN", "WALLE_PROVIDER", "WALLE_MODEL",
 		"WALLE_CONFIRM_DEFAULT", "WALLE_LOG_LEVEL",
@@ -75,6 +79,104 @@ func healthOK(t *testing.T, addr string) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+func TestCLI_HelpDoesNotRequireConfig(t *testing.T) {
+	clearWalleEnv(t)
+	var out, errOut bytes.Buffer
+	code := mainWithArgs([]string{"--help"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "wall-e run") || !strings.Contains(out.String(), "wall-e msg <type:id>") {
+		t.Fatalf("help output = %q", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errOut.String())
+	}
+}
+
+func TestCLI_MsgPostsTypedPromptAndStreamsDeltas(t *testing.T) {
+	clearWalleEnv(t)
+	t.Setenv("WALLE_TOKEN", "sekret")
+	var gotAuth string
+	var gotReq cliPromptRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/prompt" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: agent_start\ndata: {}\n\n")
+		fmt.Fprint(w, "event: delta\ndata: {\"text\":\"hello\"}\n\n")
+		fmt.Fprint(w, "event: delta\ndata: {\"text\":\" world\"}\n\n")
+		fmt.Fprint(w, "event: agent_end\ndata: {}\n\n")
+		fmt.Fprint(w, "event: done\ndata: {}\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("WALLE_PORT", fmt.Sprintf("%d", srv.Listener.Addr().(*net.TCPAddr).Port))
+
+	var out bytes.Buffer
+	code := mainWithArgs([]string{"msg", "telegram:123456789"}, strings.NewReader("prompt text"), &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if gotAuth != "Bearer sekret" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+	wantReq := cliPromptRequest{ChannelType: "telegram", Channel: "123456789", Message: "prompt text"}
+	if gotReq != wantReq {
+		t.Fatalf("request = %+v, want %+v", gotReq, wantReq)
+	}
+	if out.String() != "hello world" {
+		t.Fatalf("stdout = %q, want hello world", out.String())
+	}
+}
+
+func TestCLI_MsgRejectsBadInput(t *testing.T) {
+	clearWalleEnv(t)
+	var out, errOut bytes.Buffer
+	if code := mainWithArgs([]string{"msg", "telegram"}, strings.NewReader("hi"), &out, &errOut); code == 0 {
+		t.Fatal("bad channel exit code = 0")
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := mainWithArgs([]string{"msg", "telegram:123"}, strings.NewReader(" \n"), &out, &errOut); code == 0 {
+		t.Fatal("empty stdin exit code = 0")
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := mainWithArgs([]string{"msg", "telegram:123"}, strings.NewReader("hi"), &out, &errOut); code == 0 {
+		t.Fatal("missing token exit code = 0")
+	}
+}
+
+func TestCLI_MsgStreamErrorAndEarlyCloseFail(t *testing.T) {
+	clearWalleEnv(t)
+	t.Setenv("WALLE_TOKEN", "sekret")
+
+	srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: error\ndata: {\"message\":\"boom\"}\n\n")
+	}))
+	defer srvErr.Close()
+	t.Setenv("WALLE_PORT", fmt.Sprintf("%d", srvErr.Listener.Addr().(*net.TCPAddr).Port))
+	if code := mainWithArgs([]string{"msg", "http:c1"}, strings.NewReader("hi"), io.Discard, io.Discard); code == 0 {
+		t.Fatal("stream error exit code = 0")
+	}
+
+	srvClose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: delta\ndata: {\"text\":\"partial\"}\n\n")
+	}))
+	defer srvClose.Close()
+	t.Setenv("WALLE_PORT", fmt.Sprintf("%d", srvClose.Listener.Addr().(*net.TCPAddr).Port))
+	if code := mainWithArgs([]string{"msg", "http:c1"}, strings.NewReader("hi"), io.Discard, io.Discard); code == 0 {
+		t.Fatal("early close exit code = 0")
+	}
 }
 
 func TestRun_StartsAndShutsDownCleanly(t *testing.T) {

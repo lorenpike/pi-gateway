@@ -70,7 +70,19 @@ Non-text messages are ignored in v1.
 
 ## Mid-stream messages steer
 
-While a turn is streaming for chat X, a second message from chat X is forwarded as pi's `steer` command on the **same** slot — it does **not** start a new turn (the pool's per-channel serialization would otherwise block it until the first turn finishes). The bot keeps a small `map[chatID]*turnState` to know whether a chat has an in-flight turn; this is the chat layer's only piece of per-channel state.
+While a turn is streaming for chat X, a second message from chat X is forwarded as pi's `steer` command on the **same** slot — it does **not** start a new turn. Active-turn state is shared with HTTP/CLI prompting, so a `/v1/prompt` request targeting `channelType: "telegram"` can steer an in-flight human Telegram turn, and a human Telegram message can steer a Telegram turn originally started by HTTP/CLI automation.
+
+## HTTP/CLI prompting
+
+The HTTP prompt endpoint can target Telegram directly when the Telegram front-end is enabled:
+
+```json
+{"channelType":"telegram","channel":"123456789","message":"Scheduled task: ..."}
+```
+
+The injected user prompt is recorded in the pi transcript but is not echoed into Telegram as a user message. The assistant response is delivered to Telegram using the same edit-in-place behavior as a human-originated Telegram turn, and the HTTP caller also receives the response as SSE.
+
+`WALLE_TELEGRAM_ALLOWED_CHATS` is enforced for HTTP/CLI prompts too; targeting a disallowed chat fails instead of acquiring a pool slot.
 
 ## Self-message suppression
 

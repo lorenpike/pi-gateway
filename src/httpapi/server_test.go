@@ -336,7 +336,7 @@ func TestPrompt_NoToken_401(t *testing.T) {
 		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
 	})
 	s := newServer(t, p, Config{Token: "sekret"})
-	rr := do(t, s, http.MethodPost, "/v1/prompt", "", `{"channel":"c1","message":"hi"}`)
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "", `{"channelType":"http","channel":"c1","message":"hi"}`)
 	if rr.Code != 401 {
 		t.Fatalf("status = %d, want 401", rr.Code)
 	}
@@ -347,7 +347,7 @@ func TestPrompt_WrongToken_401(t *testing.T) {
 		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
 	})
 	s := newServer(t, p, Config{Token: "sekret"})
-	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer wrong", `{"channel":"c1","message":"hi"}`)
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer wrong", `{"channelType":"http","channel":"c1","message":"hi"}`)
 	if rr.Code != 401 {
 		t.Fatalf("status = %d, want 401", rr.Code)
 	}
@@ -358,7 +358,7 @@ func TestPrompt_WrongToken_ConstantTime(t *testing.T) {
 		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
 	})
 	s := newServer(t, p, Config{Token: "0123456789abcdef0123456789abcdef"})
-	body := `{"channel":"c1","message":"hi"}`
+	body := `{"channelType":"http","channel":"c1","message":"hi"}`
 
 	// Two wrong tokens, both same length as the correct one, but differing at
 	// different positions: wrongFirst differs at byte 0, wrongLast differs only
@@ -412,14 +412,47 @@ func TestPrompt_NoBody_400(t *testing.T) {
 	}
 }
 
+func TestPrompt_MissingChannelType_400(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channel":"c1","message":"hi"}`)
+	if rr.Code != 400 {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
 func TestPrompt_MissingChannel_400(t *testing.T) {
 	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
 		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
 	})
 	s := newServer(t, p, Config{Token: "sekret"})
-	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"message":"hi"}`)
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channelType":"http","message":"hi"}`)
 	if rr.Code != 400 {
 		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestPrompt_UnsupportedChannelType_400(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channelType":"telegram","channel":"123","message":"hi"}`)
+	if rr.Code != 400 {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+func TestPrompt_BodyTooLarge_413(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	s := newServer(t, p, Config{Token: "sekret", MaxPromptBytes: 32})
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channelType":"http","channel":"c1","message":"this is too long"}`)
+	if rr.Code != 413 {
+		t.Fatalf("status = %d, want 413", rr.Code)
 	}
 }
 
@@ -429,7 +462,7 @@ func TestPrompt_OK_StreamsSSE(t *testing.T) {
 	})
 	s := newServer(t, p, Config{Token: "sekret"})
 
-	body := `{"channel":"c1","message":"hi"}`
+	body := `{"channelType":"http","channel":"c1","message":"hi"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/prompt", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer sekret")
 	rr := httptest.NewRecorder()
@@ -468,14 +501,14 @@ func TestPrompt_OK_StreamsSSE(t *testing.T) {
 	}
 }
 
-func TestPrompt_BusyChannel_QueueUntilFree(t *testing.T) {
+func TestPrompt_SameChannelActiveTurn_Steers(t *testing.T) {
 	streamDone := make(chan struct{})
 	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
 		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl", streamDone: streamDone}
 	})
 	s := newServer(t, p, Config{Token: "sekret", QueueTimeout: 5 * time.Second})
 
-	body := `{"channel":"c1","message":"hi"}`
+	body := `{"channelType":"http","channel":"c1","message":"hi"}`
 
 	// First request: blocks in streamDone (agent_start emitted, agent_end
 	// withheld) until we close streamDone.
@@ -496,8 +529,8 @@ func TestPrompt_BusyChannel_QueueUntilFree(t *testing.T) {
 	// Give the first request a moment to acquire + start streaming.
 	time.Sleep(150 * time.Millisecond)
 
-	// Second request to the same channel: should queue (pool serialization),
-	// not 503.
+	// Second request to the same channel: should steer the active turn, not queue
+	// a separate turn or 503.
 	var secondErr error
 	var secondEvents []sseEvent
 	secondDone := make(chan struct{})
@@ -512,7 +545,7 @@ func TestPrompt_BusyChannel_QueueUntilFree(t *testing.T) {
 		secondEvents = readSSE(t, rr.Body, 2*time.Second)
 	}()
 
-	// Let the second request queue for a bit, then release the first.
+	// Let the second request attach/steer for a bit, then finish the turn.
 	time.Sleep(150 * time.Millisecond)
 	close(streamDone)
 
@@ -525,11 +558,11 @@ func TestPrompt_BusyChannel_QueueUntilFree(t *testing.T) {
 	if secondErr != nil {
 		t.Fatalf("second request error: %v", secondErr)
 	}
-	// Second must have started after the first finished (serialized).
-	if !secondStart.After(firstStart) {
-		// secondStart was captured before first finished; just sanity.
-	}
-	// Both should have streamed a full turn.
+	// The second request subscribed to the same active turn and should also see
+	// completion after the shared stream ends.
+	_ = firstStart
+	_ = secondStart
+	// Both should have streamed the shared turn.
 	if got := sseNames(firstEvents); !contains(got, "done") {
 		t.Fatalf("first events = %v, want a done", got)
 	}
@@ -545,7 +578,7 @@ func TestPrompt_BusyChannel_QueueTimeout_503(t *testing.T) {
 	})
 	s := newServer(t, p, Config{Token: "sekret", QueueTimeout: 100 * time.Millisecond})
 
-	body := `{"channel":"c1","message":"hi"}`
+	body := `{"channelType":"http","channel":"c1","message":"hi"}`
 
 	// First request holds the slot (agent_end withheld).
 	firstDone := make(chan struct{})
@@ -560,8 +593,10 @@ func TestPrompt_BusyChannel_QueueTimeout_503(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 
-	// Second request: queue timeout should fire → 503.
-	req := httptest.NewRequest(http.MethodPost, "/v1/prompt", strings.NewReader(body))
+	// Second request to a different channel: pool capacity is exhausted, so the
+	// acquire queue timeout should fire → 503.
+	body2 := `{"channelType":"http","channel":"c2","message":"hi"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/prompt", strings.NewReader(body2))
 	req.Header.Set("Authorization", "Bearer sekret")
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
@@ -582,14 +617,14 @@ func TestPrompt_BusyChannel_QueueTimeout_503(t *testing.T) {
 	<-firstDone
 }
 
-func TestPrompt_AbortViaClientDisconnect(t *testing.T) {
+func TestPrompt_ClientDisconnect_DetachesWithoutAbort(t *testing.T) {
 	streamDone := make(chan struct{})
 	p, ff, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
 		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl", streamDone: streamDone}
 	})
 	s := newServer(t, p, Config{Token: "sekret", QueueTimeout: 5 * time.Second})
 
-	body := `{"channel":"c1","message":"hi"}`
+	body := `{"channelType":"http","channel":"c1","message":"hi"}`
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "/v1/prompt", strings.NewReader(body)).
@@ -597,9 +632,8 @@ func TestPrompt_AbortViaClientDisconnect(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer sekret")
 
 	// httptest.NewRecorder implements http.Flusher; the handler streams SSE to
-	// it and blocks on slot.Events() for agent_end. Cancelling ctx simulates a
-	// client disconnect; the handler's abort goroutine must fire on
-	// r.Context().Done().
+	// it and blocks on the turn subscription. Cancelling ctx simulates a client
+	// disconnect; the handler should detach without aborting the shared turn.
 	rr := httptest.NewRecorder()
 	serverDone := make(chan struct{})
 	go func() {
@@ -631,16 +665,14 @@ func TestPrompt_AbortViaClientDisconnect(t *testing.T) {
 	// Client disconnects.
 	cancel()
 
-	// Server should send abort to the slot and release it. The fake receives
-	// "abort" and emits agent_end (per handler).
-	if !fake.waitForCommand("abort", 2*time.Second) {
-		t.Fatalf("abort never reached fake after client disconnect")
-	}
-
 	<-serverDone
 
-	// After disconnect the slot should be released: a new prompt to the same
-	// channel should succeed promptly.
+	if fake.Contains("abort") {
+		t.Fatalf("unexpected abort after client disconnect")
+	}
+
+	// Finish the still-running shared turn, then a new prompt to the same channel
+	// should succeed promptly.
 	close(streamDone)
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/prompt", strings.NewReader(body))
 	req2.Header.Set("Authorization", "Bearer sekret")

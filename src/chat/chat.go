@@ -13,11 +13,9 @@
 // DiscordAPI) so the real adapter (telegram.go, hand-rolled over net/http) is a
 // thin shim and unit tests inject a fake — no network is hit in tests.
 //
-// The bot owns NO per-channel serialization: that lives in the pool. The one
-// piece of per-chat state the bot does keep is a map[chatID]*turnState
-// (guarded by a mutex) used to decide Acquire-vs-Steer for an incoming message
-// and to hand the in-flight slot to a steering message. Documented in the Phase
-// 6 log.
+// The bot owns NO per-channel serialization: that lives in the pool. Active
+// turn state is shared with HTTP/CLI injection through package turn, so a cron
+// prompt and a human Telegram message steer the same in-flight turn.
 package chat
 
 import (
@@ -29,12 +27,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"wall-e/pool"
 	"wall-e/rpc"
 	"wall-e/session"
+	"wall-e/turn"
 )
 
 // Frontend is a chat front-end (Telegram, Discord, ...) the gateway runs
@@ -128,6 +126,10 @@ type Config struct {
 	// CommandProvider discovers pi RPC commands (extensions, prompt templates,
 	// and skills) for Telegram aliases. It may be nil.
 	CommandProvider func(context.Context) ([]rpc.Command, error)
+	// Turns coordinates active turns shared with HTTP/CLI injection. If nil,
+	// NewTelegram creates a private manager over Pool (tests/back-compat); main
+	// passes the gateway-wide manager so CLI and Telegram steer each other.
+	Turns *turn.Manager
 }
 
 // Bot is the Telegram front-end. It is a Frontend: Start launches the
@@ -135,6 +137,7 @@ type Config struct {
 type Bot struct {
 	api     TelegramAPI
 	pool    *pool.Pool
+	turns   *turn.Manager
 	allowed map[int64]bool
 
 	// editInterval is the throttle for edit-in-place (Telegram's rate limit is
@@ -161,28 +164,6 @@ type Bot struct {
 
 	// turnsWG tracks in-flight turn goroutines so Stop can drain them.
 	turnsWG sync.WaitGroup
-
-	// turns maps chatID → the active turn for that chat. Guarded by turnsMu.
-	// An incoming message with an active turn steers instead of acquiring.
-	turnsMu sync.Mutex
-	turns   map[int64]*turnState
-}
-
-// turnState is the chat-layer's one piece of per-chat state: enough to hand a
-// steering message to the in-flight turn's slot.
-//
-// Lifecycle: created (and stored in turns) BEFORE pool.Acquire so a concurrent
-// message for the same chat sees an active turn and steers. slotReady is closed
-// once the Acquire completes (slot or err set); readers wait on it before
-// touching slot/acquireErr (the close happens-after those writes per Go's
-// memory model). done is closed when the turn has fully finished (released).
-type turnState struct {
-	slotReady chan struct{}
-	done      chan struct{}
-
-	slot       *pool.Slot
-	acquireErr error
-	aborted    atomic.Bool
 }
 
 // NewTelegram builds a Telegram front-end. If api is nil, a real net/http
@@ -201,13 +182,17 @@ func NewTelegram(cfg Config, p *pool.Pool, api TelegramAPI) (*Bot, error) {
 	for _, id := range cfg.AllowedChats {
 		allowed[id] = true
 	}
+	turns := cfg.Turns
+	if turns == nil {
+		turns = turn.NewManager(context.Background(), p)
+	}
 	return &Bot{
 		api:              api,
 		pool:             p,
+		turns:            turns,
 		allowed:          allowed,
 		editInterval:     1 * time.Second,
 		idleTimeout:      5 * time.Minute,
-		turns:            make(map[int64]*turnState),
 		registerCommands: !cfg.DisableCommandRegistration,
 		commandProvider:  cfg.CommandProvider,
 		commands:         newTelegramCommandRegistry(nil),
@@ -355,29 +340,64 @@ func (b *Bot) handleMessage(msg Message) {
 		}
 	}
 
-	for {
-		b.turnsMu.Lock()
-		ts := b.turns[chatID]
-		if ts == nil {
-			// No active turn → start one. Register the turnState BEFORE
-			// Acquire so a concurrent message for the same chat steers.
-			ts = &turnState{
-				slotReady: make(chan struct{}),
-				done:      make(chan struct{}),
-			}
-			b.turns[chatID] = ts
-			b.turnsMu.Unlock()
-			b.runTurn(chatID, text, ts) // runs in this goroutine
-			return
-		}
-		b.turnsMu.Unlock()
+	if _, _, err := b.submitTelegramTurn(chatID, text, isSlash, false); err != nil {
+		_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ no agent available: "+err.Error(), 0)
+	}
+}
 
-		// Active turn → steer. If the turn turned out stale (finished between
-		// our map check and here), loop and start a fresh turn.
-		if b.steer(chatID, text, isSlash, ts) {
-			return
+func telegramChannelID(chatID int64) pool.ChannelID {
+	return pool.ChannelID(session.NewChannelID("telegram", strconv.FormatInt(chatID, 10)))
+}
+
+func (b *Bot) submitTelegramTurn(chatID int64, text string, usePromptSteer bool, subscribeOnSteer bool) (*turn.Subscription, turn.SubmitResult, error) {
+	chID := telegramChannelID(chatID)
+	opts := turn.SubmitOptions{UsePromptSteer: usePromptSteer, SubscribeOnSteer: subscribeOnSteer}
+	if subscribeOnSteer {
+		opts.ExtraNewSubscribers = 1
+	}
+	sub, res, err := b.turns.Submit(b.ctx, chID, text, opts)
+	if err != nil {
+		log.Printf("telegram: prompt/steer chat %d: %v", chatID, err)
+		return nil, res, err
+	}
+	if res.Started {
+		if subscribeOnSteer {
+			// Caller needs its own stream (HTTP/CLI). Use an extra subscription
+			// that was attached before the prompt was sent for Telegram delivery.
+			if len(res.ExtraSubscriptions) > 0 {
+				tgSub := res.ExtraSubscriptions[0]
+				b.turnsWG.Add(1)
+				go func() {
+					defer b.turnsWG.Done()
+					stopTyping := b.startTypingIndicator(chatID)
+					b.streamSubscription(chatID, tgSub, stopTyping)
+				}()
+			}
+		} else {
+			stopTyping := b.startTypingIndicator(chatID)
+			b.streamSubscription(chatID, sub, stopTyping)
 		}
 	}
+	return sub, res, nil
+}
+
+// Prompt implements httpapi.PromptAdapter for channelType "telegram". It starts
+// or steers the target Telegram chat and returns an SSE subscription for the
+// HTTP/CLI caller. On a newly-started turn, it also starts Telegram delivery for
+// the assistant response; the injected user prompt is not mirrored to Telegram.
+func (b *Bot) Prompt(ctx context.Context, channel string, message string) (*turn.Subscription, error) {
+	chatID, err := strconv.ParseInt(strings.TrimSpace(channel), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid telegram channel %q", channel)
+	}
+	if len(b.allowed) > 0 && !b.allowed[chatID] {
+		return nil, fmt.Errorf("telegram chat %d is not allowed", chatID)
+	}
+	if b.ctx == nil {
+		b.ctx = ctx
+	}
+	sub, _, err := b.submitTelegramTurn(chatID, message, false, true)
+	return sub, err
 }
 
 func (b *Bot) handleSlashCommand(chatID int64, cmdName, args string) (handled bool, rewritten string) {
@@ -416,38 +436,15 @@ func (b *Bot) handleSlashCommand(chatID int64, cmdName, args string) (handled bo
 }
 
 func (b *Bot) chatHasActiveTurn(chatID int64) bool {
-	return b.activeTurn(chatID) != nil
-}
-
-func (b *Bot) activeTurn(chatID int64) *turnState {
-	b.turnsMu.Lock()
-	defer b.turnsMu.Unlock()
-	return b.turns[chatID]
+	return b.turns.Active(telegramChannelID(chatID))
 }
 
 func (b *Bot) handleAbortCommand(chatID int64) {
-	ts := b.activeTurn(chatID)
-	if ts == nil {
+	resp, err := b.turns.Abort(b.ctx, telegramChannelID(chatID))
+	if errors.Is(err, turn.ErrNoActiveTurn) {
 		_, _ = b.api.SendMessage(b.ctx, chatID, "No active pi turn to abort.", 0)
 		return
 	}
-
-	select {
-	case <-ts.slotReady:
-	case <-b.ctx.Done():
-		return
-	}
-	if b.activeTurn(chatID) != ts {
-		_, _ = b.api.SendMessage(b.ctx, chatID, "No active pi turn to abort.", 0)
-		return
-	}
-	if ts.acquireErr != nil || ts.slot == nil {
-		_, _ = b.api.SendMessage(b.ctx, chatID, "No active pi turn to abort.", 0)
-		return
-	}
-
-	ts.aborted.Store(true)
-	resp, err := ts.slot.Client().Abort(b.ctx)
 	if err != nil || !resp.Success {
 		b.sendCommandError(chatID, "abort", resp, err)
 		return
@@ -456,7 +453,7 @@ func (b *Bot) handleAbortCommand(chatID int64) {
 }
 
 func (b *Bot) handleGatewayCommand(chatID int64, cmdName, args string) {
-	chID := pool.ChannelID(session.NewChannelID("telegram", strconv.FormatInt(chatID, 10)))
+	chID := telegramChannelID(chatID)
 	slot, err := b.pool.Acquire(b.ctx, chID)
 	if err != nil {
 		log.Printf("telegram: /%s acquire chat %d: %v", cmdName, chatID, err)
@@ -557,80 +554,6 @@ func emptyDash(s string) string {
 	return s
 }
 
-// steer forwards a mid-stream message to an active turn's slot as a `steer`
-// command (NOT a new Acquire). Returns true if handled (steered or dropped on
-// error/shutdown); false if the turn turned out stale and the caller should
-// retry as a fresh turn.
-func (b *Bot) steer(chatID int64, text string, isSlash bool, ts *turnState) (handled bool) {
-	select {
-	case <-ts.slotReady:
-	case <-b.ctx.Done():
-		return true // shutting down; drop
-	}
-	// Re-check the turn is still active (runTurn removes it from the map when
-	// done). If it finished, retry as a fresh turn.
-	b.turnsMu.Lock()
-	active := b.turns[chatID] == ts
-	b.turnsMu.Unlock()
-	if !active {
-		return false
-	}
-	if ts.acquireErr != nil {
-		// The turn never got a slot; it will clean up and unregister. Drop the
-		// steer rather than racing a fresh acquire.
-		log.Printf("telegram: steer skipped for chat %d (acquire failed earlier)", chatID)
-		return true
-	}
-	var err error
-	if isSlash {
-		// Pi RPC docs: extension slash commands must be sent via prompt, not
-		// steer. streamingBehavior=steer keeps the desired mid-stream UX.
-		_, err = ts.slot.Client().Prompt(b.ctx, text, true)
-	} else {
-		_, err = ts.slot.Client().Steer(b.ctx, text)
-	}
-	if err != nil {
-		log.Printf("telegram: steer chat %d: %v", chatID, err)
-	}
-	return true
-}
-
-// runTurn acquires a slot for the chat, sends the prompt, streams the reply,
-// edits a single message in place (throttled), finalizes on agent_end (split if
-// >4096 chars), and releases the slot. runTurn owns the slot for the turn's
-// lifetime (matching the pool's "slot stays bound until Release").
-func (b *Bot) runTurn(chatID int64, text string, ts *turnState) {
-	stopTyping := b.startTypingIndicator(chatID)
-	defer stopTyping()
-
-	defer close(ts.done)
-	defer func() {
-		b.turnsMu.Lock()
-		if b.turns[chatID] == ts {
-			delete(b.turns, chatID)
-		}
-		b.turnsMu.Unlock()
-	}()
-
-	chID := pool.ChannelID(session.NewChannelID("telegram", strconv.FormatInt(chatID, 10)))
-	slot, err := b.pool.Acquire(b.ctx, chID)
-	ts.slot = slot
-	ts.acquireErr = err
-	close(ts.slotReady)
-	if err != nil {
-		log.Printf("telegram: acquire chat %d: %v", chatID, err)
-		_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ no agent available: "+err.Error(), 0)
-		return
-	}
-	defer b.pool.Release(chID)
-
-	if _, err := slot.Client().Prompt(b.ctx, text, false); err != nil {
-		log.Printf("telegram: prompt chat %d: %v", chatID, err)
-		return
-	}
-	b.streamTurn(chatID, slot, ts, stopTyping)
-}
-
 func (b *Bot) startTypingIndicator(chatID int64) func() {
 	if b.ctx == nil {
 		return func() {}
@@ -659,11 +582,15 @@ func (b *Bot) sendTypingAction(ctx context.Context, chatID int64) {
 	}
 }
 
-// streamTurn consumes the slot's event stream, accumulating text deltas into a
-// buffer and editing a single message in place (throttled to editInterval). On
+// streamSubscription consumes a turn subscription, accumulating text deltas into
+// a buffer and editing a single message in place (throttled to editInterval). On
 // agent_end it finalizes: a final edit (or split into multiple messages if the
 // text exceeds Telegram's 4096-char limit).
-func (b *Bot) streamTurn(chatID int64, slot *pool.Slot, ts *turnState, stopTyping func()) {
+func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTyping func()) {
+	if sub == nil {
+		return
+	}
+	defer sub.Close()
 	var buf strings.Builder
 	var msgID int64 // 0 = no message sent yet
 	var lastSent string
@@ -699,9 +626,6 @@ func (b *Bot) streamTurn(chatID int64, slot *pool.Slot, ts *turnState, stopTypin
 
 	finalize := func() {
 		stopTyping()
-		if ts != nil && ts.aborted.Load() && msgID == 0 && buf.Len() == 0 {
-			return
-		}
 		b.finalizeMessage(chatID, msgID, buf.String(), lastSent)
 	}
 
@@ -731,9 +655,9 @@ func (b *Bot) streamTurn(chatID int64, slot *pool.Slot, ts *turnState, stopTypin
 		case <-b.ctx.Done():
 			stopTyping()
 			return
-		case ev, ok := <-slot.Events():
+		case ev, ok := <-sub.Events:
 			if !ok {
-				// Stream closed (process died). Finalize with what we have.
+				// Stream closed (process died or subscriber detached). Finalize with what we have.
 				finalize()
 				return
 			}

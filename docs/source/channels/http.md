@@ -39,13 +39,14 @@ No auth. Exports the selected session via pi's `export_html` RPC command into a 
 Bearer auth (`WALLE_TOKEN`). Body:
 
 ```json
-{"channel": "smoke", "message": "say hi"}
+{"channelType": "http", "channel": "smoke", "message": "say hi"}
 ```
 
-- `channel` (required) — the ChannelID string. Pick anything stable per conversation; the pool binds one pi process to it.
+- `channelType` (required) — the delivery adapter/type, for example `http` or `telegram` when Telegram is enabled.
+- `channel` (required) — the stable id within that channel type. For `http`, pick anything stable per conversation. For `telegram`, use the Telegram chat id.
 - `message` (required) — the user prompt text.
 
-On success it returns `200` with `Content-Type: text/event-stream` and streams the turn as SSE until `agent_end`, then a terminal `done` event.
+On success it returns `200` with `Content-Type: text/event-stream` and streams the turn as SSE until `agent_end`, then a terminal `done` event. The target delivery adapter may also deliver the assistant response externally; for example `channelType: "telegram"` sends the assistant response to that Telegram chat while still streaming the same response to the HTTP caller.
 
 ## SSE event format
 
@@ -78,15 +79,17 @@ data: {}
 
 ## Behavior on a busy channel
 
-The pool serializes same-channel requests: a second POST to the same `channel` while the first is streaming **blocks** (not 503) until the slot frees, then streams its own turn. The wait is bounded by `WALLE_HTTP_QUEUE_TIMEOUT` (default `60s`):
+A second POST to the same typed channel while a turn is streaming is treated like a chat mid-stream message: it **steers** the active turn instead of starting a separate queued turn. The HTTP caller can subscribe to the ongoing stream from that point forward.
 
-- If the slot frees in time → `200`, normal SSE stream.
+A POST to a different channel may need to wait for a pool slot. The wait is bounded by `WALLE_HTTP_QUEUE_TIMEOUT` (default `60s`):
+
+- If a slot is acquired in time → `200`, normal SSE stream.
 - If the wait exceeds the timeout → `503` `{"error":"channel busy"}`.
 - If the client disconnects during the wait → the handler returns silently.
 
-## Client disconnect → abort
+## Client disconnect
 
-If the client disconnects mid-stream, the handler sends `abort` to the slot's pi process (best-effort) so the pool's drain-on-reuse for the next Acquire completes promptly, then Releases the slot. This is why `docker stop` (which aborts in-flight streams via pool shutdown) lets the SSE handlers unblock and return.
+If the HTTP client disconnects mid-stream, the handler detaches its SSE subscription and returns. It does **not** abort the underlying turn, because another subscriber may still be delivering the same assistant response to an external chat such as Telegram. Pool shutdown still aborts/drains in-flight turns during gateway stop.
 
 ## Smoke test
 
@@ -97,11 +100,20 @@ PORT="${WALLE_PORT:-6007}"
 curl -s "http://localhost:$PORT/health"
 
 curl -N -H "Authorization: Bearer $TOKEN" \
-  -d '{"channel":"smoke","message":"say hi"}' \
+  -d '{"channelType":"http","channel":"smoke","message":"say hi"}' \
   http://localhost:$PORT/v1/prompt
 ```
 
 `-N` disables curl's output buffering so the SSE events stream as they arrive.
+
+The CLI wraps the same endpoint for local automation:
+
+```sh
+export WALLE_TOKEN="$TOKEN"
+wall-e msg http:smoke <<'EOF'
+say hi
+EOF
+```
 
 ## Config
 
@@ -109,6 +121,7 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 |---|---|---|
 | `WALLE_TOKEN` | — | required bearer token |
 | `WALLE_PORT` | `6007` | listen port |
-| `WALLE_HTTP_QUEUE_TIMEOUT` | `60s` | max wait on a busy channel → 503 |
+| `WALLE_HTTP_QUEUE_TIMEOUT` | `60s` | max wait to acquire/steer a prompt turn → 503 |
 | `WALLE_SITE` | `/opt/wall-e/www` | static session-debug UI dir |
 | `WALLE_SESSION_EXPORT_TIMEOUT` | `30s` | max time to export a session HTML file |
+| prompt body limit | `8 MiB` | oversized `/v1/prompt` requests return 413 |

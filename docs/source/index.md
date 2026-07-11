@@ -20,9 +20,10 @@ cron
 
 ## At a glance
 
-- **One live `pi` process per chat.** A bounded pool (`WALLE_POOL_SIZE`, default 4) binds at most one process to any active channel; per-channel serialization is enforced **in the pool**, not in each front-end.
+- **One live `pi` process per active chat.** A bounded pool (`WALLE_POOL_SIZE`, default 4) binds at most one process to any active channel; per-channel serialization is enforced **in the pool**, not in each front-end.
 - **Channel identity is stable per platform** — Telegram chat id, HTTP client-chosen `channel` string, (later) Discord channel id — and maps to a pi session transcript file on disk.
-- **Mid-stream chat messages steer**, they do not queue a new turn: a second message from a chat with an in-flight turn is forwarded as pi's `steer` command, not a new `Acquire`.
+- **Agents can discover the current channel** through `WALLE_CHANNEL=<type>:<id>`. Same-channel reuse stays warm; cross-channel slot reuse respawns `pi` so the env var is never stale.
+- **Mid-stream messages steer**, they do not queue a new turn: a second message from chat or HTTP/CLI for a channel with an in-flight turn is forwarded as pi's `steer` command, not a new `Acquire`.
 - **Stdlib-only Go.** The whole module (`module wall-e`, `go 1.26`) has zero third-party dependencies — even the Telegram Bot API is hand-rolled over `net/http`.
 
 ## Running it
@@ -42,6 +43,7 @@ src/
 ├── rpc/           pi JSONL client (framing, commands, events, ext-ui policy)
 ├── session/       channel -> transcript map (rebuilt from disk on startup)
 ├── pool/          bounded worker pool (acquire/drain/evict, per-channel ser.)
+├── turn/          shared active-turn coordinator (prompt vs steer, subscribers)
 ├── httpapi/       /health + /v1/prompt SSE
 ├── chat/          Telegram front-end (telegram.go is the net/http adapter)
 └── config/        WALLE_* env parsing

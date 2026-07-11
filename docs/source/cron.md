@@ -64,6 +64,28 @@ WALLE_SESSION_DIR=/home/wall-e/sessions
 
 The container timezone is the system timezone, expected to be UTC unless changed.
 
+## Current chat/channel
+
+Inside a live `pi` turn, wall-e sets `WALLE_CHANNEL` to the current typed channel address, for example `telegram:123456789` or `http:morning-digest`. Use it when a user says "schedule this for this chat" and you need to discover the target channel.
+
+Cron jobs do **not** inherit the `pi` process environment. If a scheduled job needs the current channel later, capture the value while creating the job and write it explicitly into the wrapper script or a private config file under `/home/wall-e`.
+
+Example scheduled message wrapper:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+CHANNEL="telegram:123456789"   # captured from $WALLE_CHANNEL when the job was created
+export WALLE_TOKEN="..."        # or source /home/wall-e/.config/cron/env
+
+wall-e msg "$CHANNEL" <<'EOF'
+Scheduled task: summarize today's calendar and top priorities.
+EOF
+```
+
+`wall-e msg` reads stdin, posts to `/v1/prompt`, streams the assistant response to stdout, and exits non-zero on gateway errors, stream errors, timeouts, or a stream that ends before `done`.
+
 ## Job style
 
 Use absolute paths. Prefer a small cron wrapper script so locking and log

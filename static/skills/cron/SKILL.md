@@ -68,6 +68,31 @@ PI_CODING_AGENT_DIR=/opt/pi
 
 The container timezone is the system timezone, expected to be UTC unless changed.
 
+## Current chat/channel
+
+When a user asks to schedule something for "this chat", inspect the current
+wall-e channel while you are still inside the live `pi` turn:
+
+```sh
+printf '%s\n' "$WALLE_CHANNEL"
+```
+
+`WALLE_CHANNEL` has the form `<type>:<id>`, for example
+`telegram:123456789` or `http:morning-digest`. Cron jobs do not inherit the
+live `pi` process environment, so write the captured channel explicitly into
+the wrapper script or a private config file if the job needs it later.
+
+Use `wall-e msg "$CHANNEL"` for scheduled messages. It reads the prompt from
+stdin, posts to the local gateway, streams assistant text to stdout, and exits
+non-zero on failure:
+
+```bash
+CHANNEL="telegram:123456789"
+wall-e msg "$CHANNEL" <<'EOF'
+Scheduled task: summarize today's calendar and top priorities.
+EOF
+```
+
 ## Job pattern
 
 Prefer a small cron wrapper script so locking and log truncation are explicit:

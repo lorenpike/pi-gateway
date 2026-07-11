@@ -5,16 +5,16 @@ package httpapi
 //
 // Concurrency / lifecycle
 // ------------------------
-// /v1/prompt does NOT re-serialize per-channel requests itself: the pool already
-// does (Acquire blocks while the channel's slot is busy). The HTTP layer
-// bounds the wait with a queue-timeout context (WALLE_HTTP_QUEUE_TIMEOUT,
-// default 60s): if Acquire doesn't succeed in time, it returns 503.
+// /v1/prompt routes typed channels through PromptAdapters. A shared turn.Manager
+// owns active-turn state across HTTP/CLI/chat front-ends: same-channel messages
+// during an in-flight turn are steered, while new turns acquire the pool. The
+// HTTP layer bounds the initial acquire/steer wait with WALLE_HTTP_QUEUE_TIMEOUT
+// (default 60s).
 //
-// Once acquired, the handler sends `prompt`, then streams events from
-// Slot.Events() to the client as SSE until it sees agent_end (the turn is
-// done). It also watches the request context: if the client disconnects
-// mid-stream, it aborts the slot's pi process (so the next Acquire drains fast
-// / the process is released) and Releases the slot.
+// Once accepted, the handler streams the turn subscription as SSE until it sees
+// agent_end. If the client disconnects, the handler detaches from the shared
+// turn without aborting it, because an external chat delivery adapter may still
+// be streaming the same assistant response.
 //
 // SSE event mapping
 // -----------------
@@ -39,6 +39,7 @@ import (
 	"wall-e/pool"
 	"wall-e/rpc"
 	"wall-e/session"
+	"wall-e/turn"
 )
 
 // Config configures the HTTP server.
@@ -63,6 +64,15 @@ type Config struct {
 	// Exporter writes exported session HTML to an output path. If nil and
 	// Sessions is configured, New installs the RPC-backed exporter.
 	Exporter SessionExporter
+	// Turns coordinates active prompt turns across HTTP/CLI/chat front-ends. If
+	// nil, New installs a manager over the supplied pool.
+	Turns *turn.Manager
+	// PromptAdapters route typed /v1/prompt requests by channelType. New always
+	// installs/overwrites the "http" adapter. Chat front-ends such as Telegram
+	// register additional adapters from main.
+	PromptAdapters map[string]PromptAdapter
+	// MaxPromptBytes bounds JSON prompt request bodies. Defaults to 8 MiB.
+	MaxPromptBytes int64
 }
 
 // Server is the wall-e HTTP gateway.
@@ -70,6 +80,19 @@ type Server struct {
 	cfg  Config
 	pool *pool.Pool
 	mux  *http.ServeMux
+}
+
+// PromptAdapter handles one typed channel target for /v1/prompt.
+type PromptAdapter interface {
+	Prompt(ctx context.Context, channel string, message string) (*turn.Subscription, error)
+}
+
+type httpPromptAdapter struct{ turns *turn.Manager }
+
+func (a httpPromptAdapter) Prompt(ctx context.Context, channel string, message string) (*turn.Subscription, error) {
+	chID := pool.ChannelID(session.NewChannelID("http", channel))
+	sub, _, err := a.turns.Submit(ctx, chID, message, turn.SubmitOptions{SubscribeOnSteer: true})
+	return sub, err
 }
 
 // SessionExporter exports a session file to an HTML output path.
@@ -105,6 +128,16 @@ func New(cfg Config, p *pool.Pool) *Server {
 	}
 	if cfg.Exporter == nil {
 		cfg.Exporter = RPCSessionExporter{RPCConfig: cfg.RPCConfig}
+	}
+	if cfg.Turns == nil {
+		cfg.Turns = turn.NewManager(context.Background(), p)
+	}
+	if cfg.PromptAdapters == nil {
+		cfg.PromptAdapters = make(map[string]PromptAdapter)
+	}
+	cfg.PromptAdapters["http"] = httpPromptAdapter{turns: cfg.Turns}
+	if cfg.MaxPromptBytes <= 0 {
+		cfg.MaxPromptBytes = 8 << 20
 	}
 	s := &Server{cfg: cfg, pool: p, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/health", s.handleHealth)
@@ -278,8 +311,9 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request, sf 
 
 // promptRequest is the body of POST /v1/prompt.
 type promptRequest struct {
-	Channel string `json:"channel"`
-	Message string `json:"message"`
+	ChannelType string `json:"channelType"`
+	Channel     string `json:"channel"`
+	Message     string `json:"message"`
 }
 
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
@@ -292,9 +326,26 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 401, "unauthorized")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxPromptBytes)
 	var req promptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, 413, fmt.Sprintf("prompt request too large (max %d bytes)", s.cfg.MaxPromptBytes))
+			return
+		}
 		writeJSONError(w, 400, "invalid JSON body")
+		return
+	}
+	req.ChannelType = strings.TrimSpace(req.ChannelType)
+	req.Channel = strings.TrimSpace(req.Channel)
+	if req.ChannelType == "" {
+		writeJSONError(w, 400, "missing channelType")
+		return
+	}
+	if strings.ContainsAny(req.ChannelType, ":/\\") {
+		writeJSONError(w, 400, "invalid channelType")
 		return
 	}
 	if req.Message == "" {
@@ -305,34 +356,35 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 400, "missing channel")
 		return
 	}
+	adapter := s.cfg.PromptAdapters[req.ChannelType]
+	if adapter == nil {
+		writeJSONError(w, 400, fmt.Sprintf("unsupported channelType %q", req.ChannelType))
+		return
+	}
 
-	// Bound the Acquire wait: the pool serializes same-channel requests; if
-	// the channel is busy for longer than QueueTimeout, return 503.
-	acqCtx, acqCancel := context.WithTimeout(r.Context(), s.cfg.QueueTimeout)
-	defer acqCancel()
-	chID := pool.ChannelID(session.NewChannelID("http", req.Channel))
-	slot, err := s.pool.Acquire(acqCtx, chID)
+	promptCtx, promptCancel := context.WithTimeout(r.Context(), s.cfg.QueueTimeout)
+	defer promptCancel()
+	sub, err := adapter.Prompt(promptCtx, req.Channel, req.Message)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			// Distinguish client-disconnect (r.Context) from queue timeout.
-			if r.Context().Err() != nil {
-				return // client already gone
-			}
 			writeJSONError(w, 503, "channel busy")
 			return
 		}
-		writeJSONError(w, 502, fmt.Sprintf("pool acquire failed: %v", err))
-		return
-	}
-	defer s.pool.Release(chID)
-
-	// Send the prompt. Use a context tied to the request so a client
-	// disconnect propagates; the client's RPC RequestTimeout (if any) does
-	// not bound streaming — only the acceptance response.
-	if _, err := slot.Client().Prompt(r.Context(), req.Message, false); err != nil {
+		if strings.Contains(err.Error(), "not allowed") {
+			writeJSONError(w, 403, err.Error())
+			return
+		}
 		writeJSONError(w, 502, fmt.Sprintf("prompt failed: %v", err))
 		return
 	}
+	if sub == nil {
+		writeJSONError(w, 502, "prompt adapter returned no stream")
+		return
+	}
+	defer sub.Close()
 
 	// Stream SSE.
 	flusher, ok := w.(http.Flusher)
@@ -346,51 +398,42 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	flusher.Flush()
 
-	// A goroutine to abort the slot when the client disconnects. We watch
-	// r.Context(); on cancel we send abort (best-effort) so the pool's
-	// drain-on-reuse for the next Acquire completes promptly.
-	abortCtx, abortCancel := context.WithCancel(context.Background())
-	defer abortCancel()
-	go func() {
+	turnDone := false
+streamLoop:
+	for {
 		select {
 		case <-r.Context().Done():
-			// Client gone: abort the in-flight turn. Best-effort; tolerate a
-			// process that has already exited.
-			_, _ = slot.Client().Abort(abortCtx)
-		case <-abortCtx.Done():
-			// Handler finished normally.
-		}
-	}()
-
-	turnDone := false
-	for ev := range slot.Events() {
-		switch ev.Type {
-		case rpc.EventAgentStart:
-			writeSSE(w, "agent_start", "{}")
-		case rpc.EventAgentEnd:
-			writeSSE(w, "agent_end", "{}")
-			turnDone = true
-		case rpc.EventMessageUpdate:
-			text, ok := decodeTextDelta(ev.Raw)
+			return
+		case ev, ok := <-sub.Events:
 			if !ok {
-				continue
+				break streamLoop
 			}
-			b, _ := json.Marshal(map[string]string{"text": text})
-			writeSSE(w, "delta", string(b))
-		default:
-			// Forward other event types as a generic "delta"? No — only text
-			// deltas become `delta` SSE events per the v1 format. Ignore the
-			// rest (tool execution, thinking, etc.) for v1.
-		}
-		flusher.Flush()
-		if turnDone {
-			break
+			switch ev.Type {
+			case rpc.EventAgentStart:
+				writeSSE(w, "agent_start", "{}")
+			case rpc.EventAgentEnd:
+				writeSSE(w, "agent_end", "{}")
+				turnDone = true
+			case rpc.EventMessageUpdate:
+				text, ok := decodeTextDelta(ev.Raw)
+				if !ok {
+					continue
+				}
+				b, _ := json.Marshal(map[string]string{"text": text})
+				writeSSE(w, "delta", string(b))
+			default:
+				// Forward other event types as a generic "delta"? No — only text
+				// deltas become `delta` SSE events per the v1 format. Ignore the
+				// rest (tool execution, thinking, etc.) for v1.
+			}
+			flusher.Flush()
+			if turnDone {
+				break streamLoop
+			}
 		}
 	}
 
-	// If the client disconnected mid-stream, the Events channel may have
-	// closed (process exited via abort→agent_end→forwarder exit) before we
-	// saw agent_end. Emit done only when we observed a clean agent_end.
+	// Emit done only when we observed a clean agent_end.
 	if turnDone {
 		writeSSE(w, "done", "{}")
 		flusher.Flush()

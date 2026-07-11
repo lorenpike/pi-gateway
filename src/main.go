@@ -1,23 +1,30 @@
-// Command wall-e is the gateway entrypoint. It loads configuration from WALLE_*
-// env vars, wires the session manager, worker pool, and HTTP server, and runs
-// until SIGINT/SIGTERM, then drains gracefully (HTTP connections + pi pool).
+// Command wall-e provides the gateway CLI. `wall-e run` loads configuration
+// from WALLE_* env vars, wires the session manager, worker pool, chat front-ends,
+// and HTTP server, then runs until SIGINT/SIGTERM. `wall-e msg <type:id>` is a
+// small local client that reads stdin and posts to the gateway.
 //
-// main() is intentionally thin: the wiring lives in run() so it is unit-
-// testable. A test builds a config from t.Setenv, drives run() with a
-// cancellable context, polls /health to confirm the server is up, then cancels
-// and asserts a clean return.
+// main() is intentionally thin: the server wiring lives in run() so it is unit-
+// testable. Tests build a config from t.Setenv, drive run() with a cancellable
+// context, poll /health to confirm the server is up, then cancel and assert a
+// clean return.
 //
 // Phase 5 of the gateway plan (archive/20260627--walle-gateway.md ┬º6).
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,24 +35,234 @@ import (
 	"wall-e/pool"
 	"wall-e/rpc"
 	"wall-e/session"
+	"wall-e/turn"
 )
 
 func main() {
-	cfg, err := config.Load()
+	os.Exit(mainWithArgs(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+func mainWithArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		printUsage(stdout)
+		return 0
+	}
+	switch args[0] {
+	case "run":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "wall-e run takes no arguments")
+			return 2
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			fmt.Fprintf(stderr, "wall-e: config: %v\n", err)
+			return 1
+		}
+		// Catch SIGINT/SIGTERM. On cancel, run() drains the HTTP server and the
+		// worker pool and returns. (On Windows only SIGINT is deliverable, but
+		// the gateway runs in a Linux container where Docker sends SIGTERM on
+		// `docker stop`.)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := run(ctx, cfg); err != nil {
+			fmt.Fprintf(stderr, "wall-e: %v\n", err)
+			return 1
+		}
+		return 0
+	case "msg":
+		if err := runMsgCommand(context.Background(), args[1:], stdin, stdout); err != nil {
+			fmt.Fprintf(stderr, "wall-e msg: %v\n", err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		printUsage(stderr)
+		return 2
+	}
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage:
+  wall-e run
+  wall-e msg <type:id>
+  wall-e --help
+
+Commands:
+  run             start the gateway server
+  msg <type:id>   read a prompt from stdin and submit it to /v1/prompt
+
+Environment for msg:
+  WALLE_PORT         local gateway port (default 6007)
+  WALLE_TOKEN        required bearer token
+  WALLE_MSG_TIMEOUT  overall timeout (default 30m)
+`)
+}
+
+const cliMaxPromptBytes = 8 << 20
+
+type cliPromptRequest struct {
+	ChannelType string `json:"channelType"`
+	Channel     string `json:"channel"`
+	Message     string `json:"message"`
+}
+
+func runMsgCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) != 1 {
+		return errors.New("usage: wall-e msg <type:id>")
+	}
+	channelType, channel, err := parseChannelAddress(args[0])
 	if err != nil {
-		log.Fatalf("wall-e: config: %v", err)
+		return err
 	}
-
-	// Catch SIGINT/SIGTERM. On cancel, run() drains the HTTP server and the
-	// worker pool and returns. (On Windows only SIGINT is deliverable, but
-	// the gateway runs in a Linux container where Docker sends SIGTERM on
-	// `docker stop`.)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if err := run(ctx, cfg); err != nil {
-		log.Fatalf("wall-e: %v", err)
+	prompt, err := readPromptStdin(stdin)
+	if err != nil {
+		return err
 	}
+	token := os.Getenv("WALLE_TOKEN")
+	if token == "" {
+		return errors.New("WALLE_TOKEN is required")
+	}
+	port := os.Getenv("WALLE_PORT")
+	if port == "" {
+		port = "6007"
+	}
+	baseURL := "http://127.0.0.1:" + port
+	timeout := 30 * time.Minute
+	if v := os.Getenv("WALLE_MSG_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid WALLE_MSG_TIMEOUT %q: %w", v, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("invalid WALLE_MSG_TIMEOUT %q: must be positive", v)
+		}
+		timeout = d
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	body, err := json.Marshal(cliPromptRequest{ChannelType: channelType, Channel: channel, Message: prompt})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(baseURL, "/") + "/v1/prompt"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := strings.TrimSpace(string(data))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return fmt.Errorf("gateway returned %s: %s", resp.Status, msg)
+	}
+	return consumeSSE(resp.Body, stdout)
+}
+
+func parseChannelAddress(s string) (channelType, channel string, err error) {
+	channelType, channel, ok := strings.Cut(s, ":")
+	if !ok || strings.TrimSpace(channelType) == "" || strings.TrimSpace(channel) == "" {
+		return "", "", fmt.Errorf("invalid channel %q: expected <type:id>", s)
+	}
+	return strings.TrimSpace(channelType), strings.TrimSpace(channel), nil
+}
+
+func readPromptStdin(r io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, cliMaxPromptBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > cliMaxPromptBytes {
+		return "", fmt.Errorf("prompt too large (max %d bytes)", cliMaxPromptBytes)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return "", errors.New("empty prompt on stdin")
+	}
+	return string(data), nil
+}
+
+func consumeSSE(r io.Reader, out io.Writer) error {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), cliMaxPromptBytes+1024)
+	event := "message"
+	var dataLines []string
+	dispatch := func() (bool, error) {
+		if event == "" && len(dataLines) == 0 {
+			return false, nil
+		}
+		data := strings.Join(dataLines, "\n")
+		switch event {
+		case "delta":
+			var d struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(data), &d); err != nil {
+				return false, fmt.Errorf("invalid delta event: %w", err)
+			}
+			if _, err := io.WriteString(out, d.Text); err != nil {
+				return false, err
+			}
+		case "error":
+			var e struct {
+				Message string `json:"message"`
+			}
+			_ = json.Unmarshal([]byte(data), &e)
+			if e.Message == "" {
+				e.Message = data
+			}
+			return false, fmt.Errorf("gateway stream error: %s", e.Message)
+		case "done":
+			return true, nil
+		}
+		return false, nil
+	}
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" {
+			done, err := dispatch()
+			if err != nil || done {
+				return err
+			}
+			event = "message"
+			dataLines = nil
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, value, ok := strings.Cut(line, ":")
+		if !ok {
+			field, value = line, ""
+		} else if strings.HasPrefix(value, " ") {
+			value = strings.TrimPrefix(value, " ")
+		}
+		switch field {
+		case "event":
+			event = value
+		case "data":
+			dataLines = append(dataLines, value)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if len(dataLines) > 0 || event != "message" {
+		done, err := dispatch()
+		if err != nil || done {
+			return err
+		}
+	}
+	return errors.New("gateway stream ended before done")
 }
 
 // telegramCommandProvider discovers pi RPC slash commands for Telegram by
@@ -84,15 +301,11 @@ func telegramCommandProvider(base rpc.Config) func(context.Context) ([]rpc.Comma
 // small slack, then returns.
 //
 // Shutdown ordering note: the plan (┬º6 Phase 5) says "HTTP first, then pool".
-// In practice the SSE handlers block on Slot.Events() waiting for agent_end,
-// so http.Server.Shutdown cannot complete until the pool aborts the streaming
-// agents (which produces the agent_end that unblocks the handlers). We
-// therefore run httpServer.Shutdown and pool.Shutdown CONCURRENTLY under one
-// grace timeout: the HTTP listener closes immediately (no new connections),
-// the pool aborts in-flight streams so handlers return, and both complete
-// within the bound. This achieves the plan's intent (graceful drain + clean
-// exit within WALLE_DRAIN_TIMEOUT) and works with the current pool/handler
-// design without modifying the green Phase 3/4 suites.
+// We run httpServer.Shutdown and pool.Shutdown CONCURRENTLY under one grace
+// timeout: the HTTP listener closes immediately (no new connections), the pool
+// aborts/drains in-flight streams so turn subscriptions finish, and both
+// complete within the bound. This achieves graceful drain + clean exit within
+// WALLE_DRAIN_TIMEOUT.
 func run(ctx context.Context, cfg config.Config) error {
 	log.SetPrefix("wall-e: ")
 	log.Printf("starting: http=%s pool=%d session_dir=%s log=%s",
@@ -117,6 +330,35 @@ func run(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	turns := turn.NewManager(ctx, p)
+
+	// 5. Optional chat front-ends. Telegram is started only if a bot token is
+	//    configured; otherwise the gateway serves HTTP alone. A Start failure
+	//    (e.g. bad token / network) is logged but non-fatal — HTTP still serves.
+	var frontends []chat.Frontend
+	if cfg.Chat.Telegram.Token != "" {
+		tb, err := chat.NewTelegram(chat.Config{
+			Token:                      cfg.Chat.Telegram.Token,
+			AllowedChats:               cfg.Chat.Telegram.AllowedChats,
+			DisableCommandRegistration: !cfg.Chat.Telegram.RegisterCommands,
+			CommandProvider:            telegramCommandProvider(cfg.RPC),
+			Turns:                      turns,
+		}, p, nil)
+		if err != nil {
+			log.Printf("telegram: disabled: %v", err)
+		} else if err := tb.Start(ctx); err != nil {
+			log.Printf("telegram: start failed: %v (HTTP still serves)", err)
+		} else {
+			frontends = append(frontends, tb)
+			if cfg.HTTP.PromptAdapters == nil {
+				cfg.HTTP.PromptAdapters = make(map[string]httpapi.PromptAdapter)
+			}
+			cfg.HTTP.PromptAdapters["telegram"] = tb
+			log.Printf("telegram: front-end started")
+		}
+	} else {
+		log.Printf("telegram: disabled (WALLE_TELEGRAM_TOKEN unset)")
+	}
 
 	// 3. HTTP server. We own the *http.Server (rather than calling
 	//    httpapi.Server.ListenAndServe) so we can Shutdown it gracefully and
@@ -124,6 +366,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	//    httpapi.Server is just the handler + config holder here.
 	cfg.HTTP.Sessions = mgr
 	cfg.HTTP.RPCConfig = cfg.RPC
+	cfg.HTTP.Turns = turns
 	srv := httpapi.New(cfg.HTTP, p)
 	listener, err := net.Listen("tcp", cfg.HTTP.Addr)
 	if err != nil {
@@ -139,29 +382,6 @@ func run(ctx context.Context, cfg config.Config) error {
 	go func() {
 		serveErr <- httpServer.Serve(listener)
 	}()
-
-	// 5. Optional chat front-ends. Telegram is started only if a bot token is
-	//    configured; otherwise the gateway serves HTTP alone. A Start failure
-	//    (e.g. bad token / network) is logged but non-fatal — HTTP still serves.
-	var frontends []chat.Frontend
-	if cfg.Chat.Telegram.Token != "" {
-		tb, err := chat.NewTelegram(chat.Config{
-			Token:                      cfg.Chat.Telegram.Token,
-			AllowedChats:               cfg.Chat.Telegram.AllowedChats,
-			DisableCommandRegistration: !cfg.Chat.Telegram.RegisterCommands,
-			CommandProvider:            telegramCommandProvider(cfg.RPC),
-		}, p, nil)
-		if err != nil {
-			log.Printf("telegram: disabled: %v", err)
-		} else if err := tb.Start(ctx); err != nil {
-			log.Printf("telegram: start failed: %v (HTTP still serves)", err)
-		} else {
-			frontends = append(frontends, tb)
-			log.Printf("telegram: front-end started")
-		}
-	} else {
-		log.Printf("telegram: disabled (WALLE_TELEGRAM_TOKEN unset)")
-	}
 
 	// 4. Wait for a signal (ctx cancel) or a serve failure (e.g. bind lost).
 	select {

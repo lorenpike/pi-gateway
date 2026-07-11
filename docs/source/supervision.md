@@ -30,7 +30,7 @@ files = /etc/supervisor/conf.d/*.conf /home/wall-e/.config/supervisor.d/*.conf
 
 ## Admin-managed programs
 
-`wall-e` is managed by `/etc/supervisor/conf.d/wall-e.conf`. The snippet runs `/usr/local/bin/wall-e` as the `wall-e` user and inherits the container environment. Defaults such as `HOME`, `PI_CODING_AGENT_DIR`, `WALLE_SESSION_DIR`, and `WALLE_SITE` come from Docker `ENV`, not from the supervisor snippet.
+`wall-e` is managed by `/etc/supervisor/conf.d/wall-e.conf`. The snippet runs `/usr/local/bin/wall-e run` as the `wall-e` user and inherits the container environment. Defaults such as `HOME`, `PI_CODING_AGENT_DIR`, `WALLE_SESSION_DIR`, and `WALLE_SITE` come from Docker `ENV`, not from the supervisor snippet.
 
 `nginx` is managed by `/etc/supervisor/conf.d/nginx.conf` and runs in the foreground under supervisor. Nginx is the container's reverse proxy and its only non-loopback listener (`0.0.0.0:80`). It fronts **project services**, which must bind `127.0.0.1` high ports; nginx reaches them over the container's loopback interface. The host (or an upstream gateway such as Cloudflare) reaches nginx via Docker `-p <host-port>:80`. Project services are never bound to `0.0.0.0` and never exposed directly by `-p`.
 
