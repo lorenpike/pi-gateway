@@ -20,7 +20,8 @@
 //     switch_session to the channel's current file, bind, mark busy.
 //     b. If at capacity, pick the LRU idle (not busy) slot, drain it if still
 //     streaming (wait for agent_end up to DrainTimeout, then abort), then
-//     switch_session to the new channel's file and rebind.
+//     respawn it with WALLE_CHANNEL set for the new channel, switch_session to
+//     the new channel's file, and rebind.
 //     c. If at capacity with no idle slot (all busy), block until a slot frees,
 //     then proceed as in (b).
 //
@@ -264,8 +265,12 @@ func (p *Pool) acquireNewChannel(ctx context.Context, channel ChannelID) (*Slot,
 			victim.mu.Unlock()
 			p.mu.Unlock()
 
-			if err := p.prepare(ctx, victim, channel); err != nil {
-				// Revert: mark idle, rebind to old channel, return error.
+			if err := p.prepare(ctx, victim, oldCh, channel); err != nil {
+				// Revert: mark idle, rebind to old channel, return error. If
+				// prepare had already respawned for the new channel, close it so
+				// the next old-channel acquire cannot observe a stale
+				// WALLE_CHANNEL.
+				p.invalidateClient(victim)
 				p.revertReuse(victim, oldCh)
 				return nil, err
 			}
@@ -346,7 +351,7 @@ func (p *Pool) findIdleLRU() *slot {
 // spawnSlot creates a fresh pi process + slot for `channel` and switch_sessions
 // to the channel's current session file. Does NOT mark busy (caller does).
 func (p *Pool) spawnSlot(ctx context.Context, channel ChannelID) (*slot, error) {
-	c, err := p.newClient(p.cfg.RPCConfig)
+	c, err := p.newClient(p.rpcConfigForChannel(channel))
 	if err != nil {
 		return nil, fmt.Errorf("pool: spawn client: %w", err)
 	}
@@ -364,23 +369,27 @@ func (p *Pool) spawnSlot(ctx context.Context, channel ChannelID) (*slot, error) 
 }
 
 // prepare readies a reused slot for a (possibly) new channel: ensures the
-// client is alive, drains any in-flight stream, then switch_sessions to the
-// new channel's file.
-func (p *Pool) prepare(ctx context.Context, s *slot, channel ChannelID) error {
+// client is alive, drains any in-flight stream, then switches to the new
+// channel's file. When the channel changes, the pi process is respawned so its
+// process environment contains the correct WALLE_CHANNEL value.
+func (p *Pool) prepare(ctx context.Context, s *slot, oldChannel, channel ChannelID) error {
+	respawned := false
 	// If the process died, respawn.
 	if s.clientClosed.Load() {
-		_ = s.client.Close()
-		c, err := p.newClient(p.cfg.RPCConfig)
-		if err != nil {
-			return fmt.Errorf("pool: respawn client: %w", err)
+		if err := p.respawn(ctx, s, channel); err != nil {
+			return err
 		}
-		s.client = c
-		s.clientClosed.Store(false)
-		p.startForwarder(s)
+		respawned = true
 	}
 	// Drain if still streaming from the previous channel's turn.
 	if s.streaming.Load() {
 		if err := p.drain(ctx, s); err != nil {
+			return err
+		}
+	}
+	// A different channel gets a fresh process so WALLE_CHANNEL is not stale.
+	if oldChannel != "" && oldChannel != channel && !respawned {
+		if err := p.respawn(ctx, s, channel); err != nil {
 			return err
 		}
 	}
@@ -389,6 +398,44 @@ func (p *Pool) prepare(ctx context.Context, s *slot, channel ChannelID) error {
 		return err
 	}
 	return nil
+}
+
+func (p *Pool) respawn(ctx context.Context, s *slot, channel ChannelID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	old := s.client
+	c, err := p.newClient(p.rpcConfigForChannel(channel))
+	if err != nil {
+		return fmt.Errorf("pool: respawn client: %w", err)
+	}
+	if old != nil {
+		_ = old.Close()
+	}
+	s.client = c
+	s.clientClosed.Store(false)
+	s.streaming.Store(false)
+	p.startForwarder(s)
+	return nil
+}
+
+func (p *Pool) invalidateClient(s *slot) {
+	if s.client != nil {
+		_ = s.client.Close()
+	}
+	s.clientClosed.Store(true)
+	s.streaming.Store(false)
+}
+
+func (p *Pool) rpcConfigForChannel(channel ChannelID) rpc.Config {
+	cfg := p.cfg.RPCConfig
+	env := make(map[string]string, len(cfg.Env)+1)
+	for k, v := range cfg.Env {
+		env[k] = v
+	}
+	env["WALLE_CHANNEL"] = channel.Address()
+	cfg.Env = env
+	return cfg
 }
 
 // switchTo sends switch_session to the channel's current session file. The

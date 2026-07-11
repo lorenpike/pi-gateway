@@ -25,7 +25,7 @@ type fakePI struct {
 	stdinWriter  *io.PipeWriter // Client writes commands here
 	stdoutReader *io.PipeReader // Client reads events here
 
-	fakeStdinR  *bufio.Reader // fake reads commands here
+	fakeStdinR  *bufio.Reader  // fake reads commands here
 	fakeStdoutW *io.PipeWriter // fake writes events here
 
 	gotMu sync.Mutex
@@ -162,11 +162,12 @@ func isClosedPipeErr(err error) bool {
 type fakeFactory struct {
 	mu     sync.Mutex
 	fakes  map[int]*fakePI // indexed by spawn sequence
+	envs   map[int]map[string]string
 	nextID int
 }
 
 func newFakeFactory() *fakeFactory {
-	return &fakeFactory{fakes: map[int]*fakePI{}}
+	return &fakeFactory{fakes: map[int]*fakePI{}, envs: map[int]map[string]string{}}
 }
 
 func (ff *fakeFactory) count() int {
@@ -181,6 +182,16 @@ func (ff *fakeFactory) all() map[int]*fakePI {
 	defer ff.mu.Unlock()
 	out := make(map[int]*fakePI, len(ff.fakes))
 	for k, v := range ff.fakes {
+		out[k] = v
+	}
+	return out
+}
+
+func (ff *fakeFactory) env(id int) map[string]string {
+	ff.mu.Lock()
+	defer ff.mu.Unlock()
+	out := make(map[string]string, len(ff.envs[id]))
+	for k, v := range ff.envs[id] {
 		out[k] = v
 	}
 	return out

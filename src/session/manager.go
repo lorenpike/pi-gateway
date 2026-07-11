@@ -51,6 +51,15 @@ func (ch ChannelID) parts() (channelType, channelID string) {
 	return "unknown", sanitizeComponent(string(ch))
 }
 
+// Address returns the human-facing typed channel address, e.g.
+// "telegram:123456789" or "http:morning-digest". Components are the sanitized
+// components stored in the ChannelID; callers that need exact external ids
+// should keep those ids separately.
+func (ch ChannelID) Address() string {
+	channelType, channelID := ch.parts()
+	return channelType + ":" + channelID
+}
+
 // Config configures a Manager.
 type Config struct {
 	// SessionDir is the directory that holds all pi transcript files.

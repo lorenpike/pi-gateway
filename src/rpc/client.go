@@ -38,7 +38,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -107,6 +109,11 @@ type Config struct {
 	// Stderr, if non-nil, receives pi's stderr (for debugging). If nil,
 	// stderr is discarded.
 	Stderr io.Writer
+
+	// Env contains additional environment variables for the pi process. Values
+	// override the inherited process environment. Used by wall-e to expose
+	// per-channel runtime context such as WALLE_CHANNEL.
+	Env map[string]string
 }
 
 // Events returns the channel onto which pi's streaming events are published.
@@ -114,6 +121,22 @@ type Config struct {
 // "extension_ui_request" are also delivered here *before* being auto-answered;
 // consumers that only care about agent progress can ignore them.
 func (c *Client) Events() <-chan Event { return c.eventsCh }
+
+func envWithOverrides(overrides map[string]string) []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+len(overrides))
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, ok := overrides[k]; ok {
+			continue
+		}
+		out = append(out, kv)
+	}
+	for k, v := range overrides {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
 
 // SessionFile returns the most recently observed session file path (updated
 // automatically after NewSession/SwitchSession/Clone via GetState resync).
@@ -154,6 +177,9 @@ func New(cfg Config) (*Client, error) {
 
 	cmd := exec.Command(cfg.PiBin, args...)
 	cmd.Dir = cfg.Dir
+	if len(cfg.Env) > 0 {
+		cmd.Env = envWithOverrides(cfg.Env)
+	}
 	if cfg.Stderr != nil {
 		cmd.Stderr = cfg.Stderr
 	} else {

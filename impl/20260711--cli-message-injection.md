@@ -68,6 +68,11 @@ environment variable set by the gateway before spawning the process:
 WALLE_CHANNEL=telegram:123456789
 ```
 
+Because environment variables are fixed at process spawn, the pool must preserve
+same-channel warm reuse but respawn a worker when an idle slot is rebound to a
+different channel. This avoids a stale `WALLE_CHANNEL` while keeping the common
+same-chat path warm.
+
 The system prompt should tell the model how to discover the current channel,
 e.g. `echo $WALLE_CHANNEL`. The `type:id` format is simple to parse when needed.
 This lets a user say "schedule this for this chat" and the agent can create

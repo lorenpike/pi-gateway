@@ -9,7 +9,8 @@ package pool
 //     new channel's file.
 //   - All-slots-busy: an (M+1)th Acquire blocks until a slot frees.
 //   - Release keeps the process warm (no kill).
-//   - LRU reuse of idle warm slots (no respawn).
+//   - LRU selection of idle warm slots, with respawn on cross-channel reuse so
+//     WALLE_CHANNEL stays correct.
 //   - Shutdown aborts streaming slots, kills all, returns; Acquire after
 //     Shutdown returns ErrPoolClosed.
 
@@ -45,7 +46,7 @@ func makeHandler(cfg fakeHandlerCfg) func(f *fakePI, cmd map[string]any) {
 			f.writeResp(id, "get_state", true, map[string]any{
 				"data": map[string]any{
 					"sessionFile": cfg.sessionFile,
-					"isStreaming":  false,
+					"isStreaming": false,
 				},
 			})
 		case "prompt":
@@ -98,6 +99,11 @@ func testPool(t *testing.T, size int, makeHandlerFor func(slotIdx int) fakeHandl
 		id := ff.nextID
 		ff.nextID++
 		ff.fakes[id] = f
+		env := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			env[k] = v
+		}
+		ff.envs[id] = env
 		ff.mu.Unlock()
 		return c, nil
 	}
@@ -332,8 +338,8 @@ func TestPool_Acquire_DifferentChannel_AbortsWhenNoAgentEnd(t *testing.T) {
 }
 
 // TestPool_AllSlotsBusy_BlocksThenAcquires: M slots all busy; an (M+1)th
-// Acquire blocks until a slot frees; then it runs. Asserts ordering and that
-// no process is leaked (count stays M).
+// Acquire blocks until a slot frees; then it runs. Cross-channel reuse respawns
+// the freed slot so WALLE_CHANNEL is correct.
 func TestPool_AllSlotsBusy_BlocksThenAcquires(t *testing.T) {
 	p, ff, _ := testPool(t, 2, func(i int) fakeHandlerCfg {
 		return fakeHandlerCfg{sessionFile: "/fake/sess.jsonl"}
@@ -387,9 +393,10 @@ func TestPool_AllSlotsBusy_BlocksThenAcquires(t *testing.T) {
 		t.Errorf("chanC acquired before chanA released")
 	}
 
-	// No new spawn beyond M=2 (reused the idle slot).
-	if ff.count() != 2 {
-		t.Errorf("expected 2 processes (reuse), got %d", ff.count())
+	// Cross-channel reuse respawns the freed slot so the process environment can
+	// carry the new WALLE_CHANNEL value.
+	if ff.count() != 3 {
+		t.Errorf("expected 3 total spawned processes after cross-channel respawn, got %d", ff.count())
 	}
 
 	_ = slotA
@@ -417,9 +424,42 @@ func TestPool_Release_KeepsProcessAlive(t *testing.T) {
 	}
 }
 
+func TestPool_WALLEChannelEnv_SetOnSpawnAndCrossChannelRespawn(t *testing.T) {
+	p, ff, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/sess.jsonl"}
+	})
+
+	chA := ChannelID(session.NewChannelID("telegram", "123456789"))
+	sA, err := p.Acquire(context.Background(), chA)
+	if err != nil {
+		t.Fatalf("Acquire telegram: %v", err)
+	}
+	clientA := sA.Client()
+	p.Release(chA)
+	if got := ff.env(0)["WALLE_CHANNEL"]; got != "telegram:123456789" {
+		t.Fatalf("first process WALLE_CHANNEL = %q, want telegram:123456789", got)
+	}
+
+	chB := ChannelID(session.NewChannelID("http", "morning-digest"))
+	sB, err := p.Acquire(context.Background(), chB)
+	if err != nil {
+		t.Fatalf("Acquire http: %v", err)
+	}
+	defer p.Release(chB)
+	if sB.Client() == clientA {
+		t.Fatalf("cross-channel acquire reused process instead of respawning")
+	}
+	if ff.count() != 2 {
+		t.Fatalf("spawn count = %d, want 2", ff.count())
+	}
+	if got := ff.env(1)["WALLE_CHANNEL"]; got != "http:morning-digest" {
+		t.Fatalf("second process WALLE_CHANNEL = %q, want http:morning-digest", got)
+	}
+}
+
 // TestPool_LRU_ReusesIdleSlot: with M=2 and two idle warm slots (chanA, chanB),
-// a new channel chanC reuses the LRU idle slot via switch_session rather than
-// spawning a third process.
+// a new channel chanC claims the LRU idle slot and respawns its process so the
+// environment has the correct WALLE_CHANNEL.
 func TestPool_LRU_ReusesIdleSlot(t *testing.T) {
 	p, ff, _ := testPool(t, 2, func(i int) fakeHandlerCfg {
 		return fakeHandlerCfg{sessionFile: "/fake/sess.jsonl"}
@@ -427,10 +467,12 @@ func TestPool_LRU_ReusesIdleSlot(t *testing.T) {
 
 	// Warm up two slots.
 	sA, _ := p.Acquire(context.Background(), "chanA")
+	clientA := sA.Client()
 	p.Release("chanA")
 	// Small delay so chanA's lastUsed < chanB's lastUsed (LRU).
 	time.Sleep(10 * time.Millisecond)
 	sB, _ := p.Acquire(context.Background(), "chanB")
+	clientB := sB.Client()
 	p.Release("chanB")
 
 	if ff.count() != 2 {
@@ -441,12 +483,13 @@ func TestPool_LRU_ReusesIdleSlot(t *testing.T) {
 	sC, _ := p.Acquire(context.Background(), "chanC")
 	defer p.Release("chanC")
 
-	if ff.count() != 2 {
-		t.Errorf("expected reuse (2 processes), got %d", ff.count())
+	if ff.count() != 3 {
+		t.Errorf("expected cross-channel respawn (3 total spawned processes), got %d", ff.count())
 	}
-	// chanC should reuse one of the prior clients (warm reuse).
-	if sC.Client() != sA.Client() && sC.Client() != sB.Client() {
-		t.Errorf("chanC reused neither warm client (respawned instead)")
+	// Same-channel warm reuse is preserved, but cross-channel reuse intentionally
+	// replaces the process to avoid a stale WALLE_CHANNEL.
+	if sC.Client() == clientA || sC.Client() == clientB {
+		t.Errorf("chanC reused a previous client despite needing a new WALLE_CHANNEL")
 	}
 	_ = sA
 	_ = sB
