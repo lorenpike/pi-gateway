@@ -61,19 +61,17 @@ CLI stream.
 
 ## Current channel environment
 
-Each `pi` process/session should know its bound channel through environment
-variables set by the gateway before spawning the process:
+Each `pi` process/session should know its bound channel through a single
+environment variable set by the gateway before spawning the process:
 
 ```sh
 WALLE_CHANNEL=telegram:123456789
-WALLE_CHANNEL_TYPE=telegram
-WALLE_CHANNEL_ID=123456789
 ```
 
 The system prompt should tell the model how to discover the current channel,
-e.g. `echo $WALLE_CHANNEL`. This lets a user say "schedule this for this chat"
-and the agent can create cron jobs targeting the current channel without asking
-for a raw chat id.
+e.g. `echo $WALLE_CHANNEL`. The `type:id` format is simple to parse when needed.
+This lets a user say "schedule this for this chat" and the agent can create
+cron jobs targeting the current channel without asking for a raw chat id.
 
 ## Prompt visibility
 
@@ -163,8 +161,7 @@ stream ending before completion.
    - Support `http` first.
 
 4. **Channel env injection**
-   - Set `WALLE_CHANNEL`, `WALLE_CHANNEL_TYPE`, and `WALLE_CHANNEL_ID` for the
-     spawned/bound `pi` process.
+   - Set `WALLE_CHANNEL=<type:id>` for the spawned/bound `pi` process.
    - Update `SYSTEM.md` to mention `echo $WALLE_CHANNEL`.
 
 5. **Telegram adapter**
