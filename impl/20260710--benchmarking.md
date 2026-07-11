@@ -61,123 +61,128 @@ attempt_id 20260710T193012Z-a83f/onboarding_identity/003
 channel    bench-onboarding-identity-003-a83f
 ```
 
-Use the attempt ID in channels, temp paths, Docker names, volume names, log
-filenames, and result JSON so parallel attempts do not collide.
+Use the attempt ID in channels, temp paths, log filenames, and result JSON so
+parallel attempts do not collide. In Docker mode the harness should avoid fixed
+container names; use Docker's generated name plus a `--cidfile` when the runner
+needs to stop the container.
 
-## Schema shape
+## Python package and API shape
 
-Prefer Python-first specs, with dataclasses/Pydantic-style models in the runner.
-YAML can be added later as a thin serialization layer, but Python makes scripted
-setup, helper agents, and custom checks easier to read and maintain.
+Use a real Python package rather than a single script:
 
-Sketch:
+```text
+benchmark/
+  pyproject.toml                  setuptools build system
+  src/walle_bench/
+    client.py                     simulated human/helper LLM client
+    docker.py                     low-level Docker lifecycle helper
+    agent.py                      target agent wrapper around the container API
+    utils.py                      small benchmark utilities such as timeout
+  tests/                          current exploratory benchmark-style tests
+```
+
+`walle_bench` already names the domain, so avoid redundant class names such as
+`WallEContainer`. Prefer simple names at the module boundary:
 
 ```python
-Test(
-    name="onboarding_identity",
-    tags={"onboarding", "context"},
-    attempts=5,
-    timeout_s=600,
-    target=Target(
-        mode="docker",              # docker | existing_http
-        image="wall-e:bench",       # or build from current tree
-        pool_size=1,
-        model="...",                # optional override
-        provider="...",             # optional override
-        keep_volume="on_fail",      # never | on_fail | always
-    ),
-    setup=[
-        SeedFile("/home/wall-e/CONTEXT.md", ""),
-        HelperAgent(
-            name="carl",
-            provider="openai",
-            model="gpt-4o",
-            system="You are Carl Van Boom...",
-        ),
-    ],
-    actions=[
-        HelperPrompt(
-            helper="carl",
-            prompt="""
-            You're name is Carl Van Boom. You work for Ardian Financial
-            Consulting a company from Winnepeg. You are setting up a computer
-            agent which you will name Isaac. Please start with "Hi" to begin
-            the agent onboarding process.
-            """,
-            save_as="carl_opening",
-        ),
-        SendPrompt(input_ref="carl_opening"),
-    ],
-    collect=[
-        CollectSession(),
-        CollectPath("/home/wall-e/CONTEXT.md"),
-        CollectVolumeSnapshot(),
-    ],
-    graders=[
-        ContainsText(path="/home/wall-e/CONTEXT.md", text="Carl Van Boom"),
-        ContainsText(path="/home/wall-e/CONTEXT.md", text="Ardian Financial Consulting"),
-        LLMGrade(
-            name="context_identity_rubric",
-            inject_environment=True,
-            prompt="""
-            Inspect the final CONTEXT.md and transcript. Return JSON with
-            pass=true only if the agent has correctly recorded the user's name,
-            company, location, and desired agent name.
-            """,
-        ),
-        ManualCheck("Confirm CONTEXT.md has the right user/company and no obvious hallucinated identity."),
-    ],
-    pass_policy=PassPolicy(min_attempt_passes=3),
-)
+from walle_bench import Agent, Client, timeout
+from walle_bench.docker import Container
 ```
 
-## Isolation and parallelism
+Current benchmark case style:
 
-Two target modes are useful:
+```python
+from itertools import cycle, islice
 
-1. **Hermetic Docker mode** for real benchmarks.
-   - Build or reuse the wall-e image.
-   - Start one container per attempt or one container per worker.
-   - Mount a unique home/session volume per attempt.
-   - Use a unique `WALLE_TOKEN`, `WALLE_PORT`, and channel.
-   - Stop the container at timeout or completion.
-   - Preserve the volume snapshot on failure or when requested.
+from walle_bench import Agent, Client, timeout
 
-2. **Existing HTTP mode** for quick development.
-   - Runner points at `WALLE_URL` and `WALLE_TOKEN`.
-   - Each attempt uses a unique channel.
-   - Faster, but not fully isolated because the backing container and persisted
-     home may be shared.
 
-Parallelism should be controlled at the runner level:
+def test_onboarding():
+    client = Client("""
+    Your name is Matt. You are a personal tax accountant at Acme Accounting.
+    Say hi to kick off onboarding. When done, say 'hotcakes'.
+    """)
 
-```sh
-uv run scripts/bench.py run benchmarks --jobs 4 --attempts 5 --timeout 600
+    with Agent() as agent, timeout(300):
+        response = None
+        for bot in islice(cycle([client, agent]), 25):
+            response = bot(response)
+            if bot is client and "hotcakes" in response:
+                break
+
+        context_md = (agent.workspace / "CONTEXT.md").read_text()
+        assert "Matt" in context_md
+        assert "Acme Accounting" in context_md
 ```
 
-The default `--jobs` should not exceed the wall-e pool size unless running one
-container per attempt. Timeouts must terminate the prompt stream and then collect
-whatever logs/artifacts are available.
+Longer-term declarative `Test(...)` objects can still be layered on top of this,
+but the immediate framework should preserve the readability of plain Python.
+
+## Isolation, home seeding, and parallelism
+
+Canonical benchmark runs should use **one fresh container per attempt**. Reusing
+containers can hide bugs or create false failures because the agent mutates its
+home directory, session state, context, caches, and generated artifacts.
+
+The current Docker strategy is:
+
+- Build/reuse a single `wall-e` image for the run.
+- For each attempt, create a temporary host root with a lazy `home/` directory.
+- Seed `home/` by copying `/home/wall-e` from a temporary image container.
+- Normalize the seeded tree with `chown -R wall-e:wall-e` and
+  `chmod -R u+rwX` so the running container can mutate it.
+- Bind mount that host directory as `/home/wall-e`.
+- Run Docker with `--rm`, no explicit container name, and a `--cidfile` so the
+  harness can stop the container.
+- Use `socket` to find a free host/container `WALLE_PORT` per attempt. Do not
+  hard-code a benchmark port; parallel runs must not collide.
+- Use a unique `WALLE_TOKEN` and channel per attempt.
+- Stop the container at timeout/completion. Keep the temp root for inspection by
+  default; call `clean()` when the benchmark should delete it.
+
+The low-level `Container` API should stay small:
+
+```python
+container = Container()
+container.home       # lazy seeded host Path mounted to /home/wall-e
+container.start()    # starts docker, assigns container.port, writes logs
+container.url        # http://127.0.0.1:<port>
+container.process    # attached docker run process
+container.stop()     # stop container, keep home for inspection
+container.clean()    # stop and remove the temp root
+```
+
+`Agent` is the higher-level context manager:
+
+```python
+with Agent() as agent:
+    reply = agent("hi")
+    context = (agent.workspace / "CONTEXT.md").read_text()
+# __exit__ stops the container; clean() remains explicit for inspection control
+```
+
+An existing shared HTTP target can still be useful later for quick development,
+but it should be marked non-canonical because it lacks filesystem isolation.
 
 ## Runner CLI
 
-Proposed commands:
+Proposed package command once the runner graduates from exploratory tests:
 
 ```sh
-# list discovered tests
-uv run scripts/bench.py list benchmarks/
+# list discovered cases
+uv run --project benchmark walle-bench list benchmark/cases/
 
-# run one test once while developing
-uv run scripts/bench.py run benchmarks/onboarding.py::onboarding_identity --attempts 1 --keep-all
+# run one case once while developing
+uv run --project benchmark walle-bench run benchmark/cases/onboarding.py::onboarding_identity --attempts 1 --keep-all
 
 # run a suite in parallel
-uv run scripts/bench.py run benchmarks/ --jobs 4 --attempts 5
+uv run --project benchmark walle-bench run benchmark/cases/ --jobs 4 --attempts 5
 
 # inspect a previous run
-uv run scripts/bench.py show build/bench/runs/20260710T193012Z-a83f
+uv run --project benchmark walle-bench show build/bench/runs/20260710T193012Z-a83f
 
 # rerun failed tests from a previous run
-uv run scripts/bench.py rerun-failed build/bench/runs/20260710T193012Z-a83f
+uv run --project benchmark walle-bench rerun-failed build/bench/runs/20260710T193012Z-a83f
 ```
 
 Useful flags:
@@ -208,14 +213,14 @@ build/bench/runs/<run_id>/
     events.jsonl                   raw SSE/RPC event stream
     transcript.html                exported wall-e/pi transcript when available
     transcript.jsonl               normalized transcript when available
+    home/                          bind-mounted /home/wall-e; final persisted state
     logs/
-      container.log
-      gateway.log
-      supervisor.log
+      docker.log                   attached docker stdout/stderr
+      gateway.log                  optional extracted app log
+      supervisor.log               optional extracted supervisor log
     artifacts/
-      CONTEXT.md
+      CONTEXT.md                   optional copied convenience artifact
       generated-files/...
-    volume/                        optional copied persisted volume
     graders/
       deterministic.json
       llm-context_identity_rubric.prompt.txt
@@ -223,10 +228,13 @@ build/bench/runs/<run_id>/
       manual.md
 ```
 
-Failure diagnosis requires `events.jsonl`, transcript export, container logs, and
-collected files even if the attempt times out. If the runner cannot collect one
-of these, it should record that as a collection error in `attempt.json` rather
-than failing silently.
+The bind-mounted `home/` is the primary volume snapshot. It should normally be
+kept after failures and during local development because it is the easiest way to
+inspect `CONTEXT.md`, sessions, generated files, and any other persisted agent
+state. Failure diagnosis also requires `events.jsonl`, transcript export, and
+container logs even if the attempt times out. If the runner cannot collect one of
+these, it should record that as a collection error in `attempt.json` rather than
+failing silently.
 
 ## Grading model
 
@@ -320,24 +328,33 @@ ConversationLoop(
 
 ## Implementation milestones
 
-1. Add `scripts/bench.py` with a tiny Python model, test discovery, and `list`.
-2. Implement existing-HTTP target mode and SSE capture for `/v1/prompt`.
-3. Add deterministic graders and result directory layout.
-4. Add Docker target mode with isolated volumes and timeout cleanup.
-5. Add transcript/session export collection.
-6. Add LLM graders with strict JSON responses and stored prompts/responses.
-7. Add helper agents and conversation loops.
-8. Add summary markdown/json reporting and rerun-failed support.
-9. Promote one or two onboarding/context tests into `benchmarks/`.
+1. Create the `benchmark/` Python package with setuptools/uv metadata. **Done.**
+2. Add a simple OpenAI-backed `Client` for simulated humans/helper agents.
+   **Done.**
+3. Add a lazy Docker `Container` helper with temp home seeding, dynamic port
+   selection, `start()`, `stop()`, `clean()`, `home`, and `process`. **Done.**
+4. Add an `Agent` context manager that starts/stops the container and sends
+   prompts to `/v1/prompt` while parsing SSE deltas. **Done.**
+5. Improve event capture so every prompt stores raw SSE to `events.jsonl`, not
+   just the final assembled response.
+6. Add result directory management under `build/bench/runs/<run_id>/`.
+7. Add deterministic graders and a first summary report.
+8. Add transcript/session export collection.
+9. Add LLM graders with strict JSON responses and stored prompts/responses.
+10. Add attempts/jobs runner with per-attempt containers and timeout cleanup.
+11. Move exploratory benchmark-style tests into a clearer `benchmark/cases/`
+    directory once the runner exists.
+12. Add `pyinstrument` profiling command/docs for slow benchmark diagnosis.
 
 ## Open questions
 
-- Should benchmarks live in `benchmarks/`, `tests/benchmarks/`, or `impl/benchmarks/`?
 - Should CI run a small smoke subset, or are all benchmarks manual/on-demand due
   to model cost and credentials?
-- What is the canonical target volume path to snapshot in Docker mode:
-  `/home/wall-e`, `/home/wall-e/sessions`, or the full container diff?
+- Should exploratory benchmark cases remain under `benchmark/tests/` briefly, or
+  move immediately to `benchmark/cases/` to avoid pytest/unit-test confusion?
+- Should `Agent.__exit__` only `stop()` (current preference, keeps home for
+  inspection) or optionally `clean()` under a runner-controlled policy?
 - Should the injected grader run with write access, or only against a read-only
-  copy of the attempt volume? Default should be read-only/copy-on-write.
+  copy of the attempt home? Default should be read-only/copy-on-write.
 - How much model/provider metadata can pi expose in transcripts for later
   reproducibility?

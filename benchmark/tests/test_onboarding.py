@@ -3,7 +3,7 @@ from itertools import cycle, islice
 from walle_bench import Agent, Client, timeout
 
 MAX_TURNS = 25
-TIMEOUT = 60  # seconds
+TIMEOUT = 120  # seconds
 
 
 def test_onboarding():
@@ -54,17 +54,16 @@ def runner():
 
 
 if __name__ == "__main__":
-    runner()
-    # from threading import Thread
-    #
-    # threads = [
-    #     Thread(target=runner),
-    #     Thread(target=runner),
-    #     Thread(target=runner),
-    # ]
-    #
-    # for t in threads:
-    #     t.start()
-    #
-    # for t in threads:
-    #     t.join()
+    from threading import Thread
+
+    threads = [
+        Thread(target=runner),
+        Thread(target=runner),
+        Thread(target=runner),
+    ]
+
+    for t in threads:
+        t.start()
+
+    for t in threads:
+        t.join()

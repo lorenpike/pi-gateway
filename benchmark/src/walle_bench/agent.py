@@ -22,6 +22,18 @@ class Agent:
     def workspace(self) -> Path:
         return self.container.home
 
+    @property
+    def transcript(self) -> list[dict[str, str]] | None:
+        try:
+            transcript_file = next(
+                (self.workspace / "sessions").glob(f"*{self.channel}*.jsonl")
+            )
+        except StopIteration:
+            return None
+
+        with open(transcript_file, "r", encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
     def __enter__(self) -> Agent:
         self.start()
         return self
@@ -49,6 +61,10 @@ class Agent:
         reply = read_sse_response(response)
         self.messages.append(("agent", reply))
         return reply
+
+    def new_session(self) -> None:
+        self.messages.clear()
+        self.channel = f"bench-{secrets.token_hex(6)}"
 
     def start(self) -> None:
         self.container.start()
