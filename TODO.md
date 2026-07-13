@@ -12,9 +12,9 @@
 
 ## Appendix A: Markdown formatting regressions
 
-Add improperly formatted message examples below in `----` blocks so they can be turned into parser tests.
+Add improperly formatted message examples below in `<?--example-->` blocks so they can be turned into parser tests.
 
-----
+<?--example-->
 With the current setup, email could be handled as another **front-end/channel adapter**, similar to Telegram or HTTP.
 
 Current architecture already has the useful core pieces:
@@ -95,4 +95,4 @@ Main missing pieces:
 - Safety controls: allowed senders, max body size, maybe approval before sending external replies.
 
 So: email is very compatible with the current channel architecture. The fastest version is a script using `wall-e msg`; the clean version is a first-class `email` adapter.
-----
+<?--example-->

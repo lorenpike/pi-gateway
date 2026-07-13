@@ -25,6 +25,14 @@ func TestRenderTelegramMarkdown_EscapesUnsupportedMarkdown(t *testing.T) {
 	}
 }
 
+func TestRenderTelegramMarkdown_AvoidsCodeInsideStyleEntities(t *testing.T) {
+	input := "**Quick/simple: cron + `wall-e msg`** and *use `m2h` too*"
+	want := "<b>Quick/simple: cron + </b><code>wall-e msg</code> and <i>use </i><code>m2h</code><i> too</i>"
+	if got := renderTelegramMarkdown(input); got != want {
+		t.Fatalf("renderTelegramMarkdown() = %q, want %q", got, want)
+	}
+}
+
 func TestHTTPTelegramAPI_SendMessageUsesHTMLParseMode(t *testing.T) {
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

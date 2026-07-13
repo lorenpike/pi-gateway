@@ -10,6 +10,12 @@ import (
 
 const telegramParseModeHTML = "HTML"
 
+// RenderTelegramMarkdown converts Markdown-ish text into the Telegram Bot API's
+// supported HTML parse mode subset.
+func RenderTelegramMarkdown(md string) string {
+	return renderTelegramMarkdown(md)
+}
+
 // renderTelegramMarkdown converts the assistant's normal Markdown-ish output
 // into the Telegram Bot API's HTML parse mode. Telegram does not understand
 // CommonMark directly (and MarkdownV2 requires aggressive escaping), so we emit
@@ -73,7 +79,7 @@ func renderTelegramMarkdown(md string) string {
 	if inFence {
 		out.WriteString("</code></pre>")
 	}
-	return out.String()
+	return removeEmptyTelegramStyleTags(out.String())
 }
 
 func sanitizeTelegramCodeLanguage(lang string) string {
@@ -162,6 +168,10 @@ func unorderedListItem(s string) (string, bool) {
 }
 
 func renderTelegramInlineMarkdown(s string, depth int) string {
+	return renderTelegramInlineMarkdownWithActive(s, depth, nil)
+}
+
+func renderTelegramInlineMarkdownWithActive(s string, depth int, activeTags []string) string {
 	if s == "" {
 		return ""
 	}
@@ -181,9 +191,14 @@ func renderTelegramInlineMarkdown(s string, depth int) string {
 
 		if strings.HasPrefix(s[i:], "`") {
 			if end, ticks := findInlineCodeEnd(s, i); end >= 0 {
+				// Telegram doesn't allow code/pre entities inside bold, italic,
+				// underline, strikethrough, or spoiler entities. Temporarily close
+				// active style tags around inline code, then reopen them.
+				writeClosingTags(&out, activeTags)
 				out.WriteString("<code>")
 				out.WriteString(html.EscapeString(s[i+ticks : end]))
 				out.WriteString("</code>")
+				writeOpeningTags(&out, activeTags)
 				i = end + ticks
 				continue
 			}
@@ -207,7 +222,7 @@ func renderTelegramInlineMarkdown(s string, depth int) string {
 		if strings.HasPrefix(s[i:], "**") && canOpenEmphasis(s, i, "**") {
 			if end := findClosingEmphasis(s, i+2, "**"); end >= 0 {
 				out.WriteString("<b>")
-				out.WriteString(renderTelegramInlineMarkdown(s[i+2:end], depth+1))
+				out.WriteString(renderTelegramInlineMarkdownWithActive(s[i+2:end], depth+1, appendActiveTag(activeTags, "b")))
 				out.WriteString("</b>")
 				i = end + 2
 				continue
@@ -216,7 +231,7 @@ func renderTelegramInlineMarkdown(s string, depth int) string {
 		if strings.HasPrefix(s[i:], "__") && canOpenEmphasis(s, i, "__") {
 			if end := findClosingEmphasis(s, i+2, "__"); end >= 0 {
 				out.WriteString("<b>")
-				out.WriteString(renderTelegramInlineMarkdown(s[i+2:end], depth+1))
+				out.WriteString(renderTelegramInlineMarkdownWithActive(s[i+2:end], depth+1, appendActiveTag(activeTags, "b")))
 				out.WriteString("</b>")
 				i = end + 2
 				continue
@@ -225,7 +240,7 @@ func renderTelegramInlineMarkdown(s string, depth int) string {
 		if strings.HasPrefix(s[i:], "~~") && canOpenEmphasis(s, i, "~~") {
 			if end := findClosingEmphasis(s, i+2, "~~"); end >= 0 {
 				out.WriteString("<s>")
-				out.WriteString(renderTelegramInlineMarkdown(s[i+2:end], depth+1))
+				out.WriteString(renderTelegramInlineMarkdownWithActive(s[i+2:end], depth+1, appendActiveTag(activeTags, "s")))
 				out.WriteString("</s>")
 				i = end + 2
 				continue
@@ -234,7 +249,7 @@ func renderTelegramInlineMarkdown(s string, depth int) string {
 		if s[i] == '*' && !strings.HasPrefix(s[i:], "**") && canOpenEmphasis(s, i, "*") {
 			if end := findClosingEmphasis(s, i+1, "*"); end >= 0 {
 				out.WriteString("<i>")
-				out.WriteString(renderTelegramInlineMarkdown(s[i+1:end], depth+1))
+				out.WriteString(renderTelegramInlineMarkdownWithActive(s[i+1:end], depth+1, appendActiveTag(activeTags, "i")))
 				out.WriteString("</i>")
 				i = end + 1
 				continue
@@ -243,7 +258,7 @@ func renderTelegramInlineMarkdown(s string, depth int) string {
 		if s[i] == '_' && !strings.HasPrefix(s[i:], "__") && canOpenEmphasis(s, i, "_") {
 			if end := findClosingEmphasis(s, i+1, "_"); end >= 0 {
 				out.WriteString("<i>")
-				out.WriteString(renderTelegramInlineMarkdown(s[i+1:end], depth+1))
+				out.WriteString(renderTelegramInlineMarkdownWithActive(s[i+1:end], depth+1, appendActiveTag(activeTags, "i")))
 				out.WriteString("</i>")
 				i = end + 1
 				continue
@@ -255,6 +270,41 @@ func renderTelegramInlineMarkdown(s string, depth int) string {
 		i += n
 	}
 	return out.String()
+}
+
+func appendActiveTag(tags []string, tag string) []string {
+	next := make([]string, 0, len(tags)+1)
+	next = append(next, tags...)
+	next = append(next, tag)
+	return next
+}
+
+func removeEmptyTelegramStyleTags(s string) string {
+	for {
+		next := strings.ReplaceAll(s, "<b></b>", "")
+		next = strings.ReplaceAll(next, "<i></i>", "")
+		next = strings.ReplaceAll(next, "<s></s>", "")
+		if next == s {
+			return s
+		}
+		s = next
+	}
+}
+
+func writeClosingTags(out *strings.Builder, tags []string) {
+	for i := len(tags) - 1; i >= 0; i-- {
+		out.WriteString("</")
+		out.WriteString(tags[i])
+		out.WriteByte('>')
+	}
+}
+
+func writeOpeningTags(out *strings.Builder, tags []string) {
+	for _, tag := range tags {
+		out.WriteByte('<')
+		out.WriteString(tag)
+		out.WriteByte('>')
+	}
 }
 
 func findInlineCodeEnd(s string, start int) (end int, ticks int) {
