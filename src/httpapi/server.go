@@ -25,7 +25,9 @@ package httpapi
 //   error mid-stream    → event: error\ndata: {"message":"..."}\n\n then close
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,7 @@ import (
 	"strings"
 	"time"
 
+	"wall-e/media"
 	"wall-e/pool"
 	"wall-e/rpc"
 	"wall-e/session"
@@ -73,6 +76,9 @@ type Config struct {
 	PromptAdapters map[string]PromptAdapter
 	// MaxPromptBytes bounds JSON prompt request bodies. Defaults to 8 MiB.
 	MaxPromptBytes int64
+	// SendAdapters route typed /v1/send requests by channelType. Chat front-ends
+	// such as Telegram register their direct-delivery adapter from main.
+	SendAdapters map[string]SendAdapter
 }
 
 // Server is the wall-e HTTP gateway.
@@ -93,6 +99,32 @@ func (a httpPromptAdapter) Prompt(ctx context.Context, channel string, message s
 	chID := pool.ChannelID(session.NewChannelID("http", channel))
 	sub, _, err := a.turns.Submit(ctx, chID, message, turn.SubmitOptions{SubscribeOnSteer: true})
 	return sub, err
+}
+
+// SendRequest asks a channel adapter to deliver text and/or one local file
+// directly without creating an agent turn.
+type SendRequest struct {
+	Channel   string
+	Text      string
+	MediaPath string
+	Caption   string
+}
+
+// SentItem describes one delivered item in a direct send result.
+type SentItem struct {
+	Type string `json:"type"`
+	Path string `json:"path,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+// SendResult is returned by a direct delivery adapter.
+type SendResult struct {
+	Sent []SentItem `json:"sent"`
+}
+
+// SendAdapter handles one typed channel target for /v1/send.
+type SendAdapter interface {
+	Send(ctx context.Context, req SendRequest) (SendResult, error)
 }
 
 // SessionExporter exports a session file to an HTML output path.
@@ -142,6 +174,7 @@ func New(cfg Config, p *pool.Pool) *Server {
 	s := &Server{cfg: cfg, pool: p, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/v1/prompt", s.handlePrompt)
+	s.mux.HandleFunc("/v1/send", s.handleSend)
 	s.mux.HandleFunc("/v1/sessions", s.handleSessions)
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionDetail)
 	if cfg.SiteDir != "" {
@@ -311,9 +344,16 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request, sf 
 
 // promptRequest is the body of POST /v1/prompt.
 type promptRequest struct {
-	ChannelType string `json:"channelType"`
-	Channel     string `json:"channel"`
-	Message     string `json:"message"`
+	ChannelType string             `json:"channelType"`
+	Channel     string             `json:"channel"`
+	Message     string             `json:"message"`
+	Attachments []promptAttachment `json:"attachments,omitempty"`
+}
+
+type promptAttachment struct {
+	FileName string `json:"fileName"`
+	MimeType string `json:"mimeType,omitempty"`
+	Data     string `json:"data"`
 }
 
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +388,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 400, "invalid channelType")
 		return
 	}
-	if req.Message == "" {
+	if req.Message == "" && len(req.Attachments) == 0 {
 		writeJSONError(w, 400, "missing message")
 		return
 	}
@@ -362,9 +402,44 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	message := req.Message
+	if len(req.Attachments) > 0 {
+		store, err := s.mediaStore()
+		if err != nil {
+			writeJSONError(w, 500, err.Error())
+			return
+		}
+		files := make([]media.SavedFile, 0, len(req.Attachments))
+		for i, att := range req.Attachments {
+			if strings.TrimSpace(att.Data) == "" {
+				writeJSONError(w, 400, fmt.Sprintf("attachment %d missing data", i))
+				return
+			}
+			name := strings.TrimSpace(att.FileName)
+			if name == "" {
+				name = fmt.Sprintf("attachment-%d", i+1)
+			}
+			decoded, err := base64.StdEncoding.DecodeString(att.Data)
+			if err != nil {
+				writeJSONError(w, 400, fmt.Sprintf("attachment %d invalid base64 data", i))
+				return
+			}
+			saved, err := store.Save(r.Context(), name, bytes.NewReader(decoded))
+			if err != nil {
+				writeJSONError(w, 500, fmt.Sprintf("save attachment %d failed: %v", i, err))
+				return
+			}
+			if strings.TrimSpace(att.MimeType) != "" {
+				saved.MimeType = strings.TrimSpace(att.MimeType)
+			}
+			files = append(files, saved)
+		}
+		message = media.FormatAttachmentPrompt(req.Message, files)
+	}
+
 	promptCtx, promptCancel := context.WithTimeout(r.Context(), s.cfg.QueueTimeout)
 	defer promptCancel()
-	sub, err := adapter.Prompt(promptCtx, req.Channel, req.Message)
+	sub, err := adapter.Prompt(promptCtx, req.Channel, message)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return
@@ -446,6 +521,106 @@ streamLoop:
 		writeSSE(w, "error", `{"message":"agent stream ended unexpectedly"}`)
 		flusher.Flush()
 	}
+}
+
+// sendRequest is the body of POST /v1/send.
+type sendRequest struct {
+	ChannelType string `json:"channelType"`
+	Channel     string `json:"channel"`
+	Text        string `json:"text,omitempty"`
+	MediaPath   string `json:"mediaPath,omitempty"`
+	Caption     string `json:"caption,omitempty"`
+}
+
+type sendResponse struct {
+	OK      bool       `json:"ok"`
+	Channel string     `json:"channel,omitempty"`
+	Sent    []SentItem `json:"sent,omitempty"`
+	Error   string     `json:"error,omitempty"`
+}
+
+func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, 405, sendResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+	if !authorize(r, s.cfg.Token) {
+		writeJSON(w, 401, sendResponse{OK: false, Error: "unauthorized"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxPromptBytes)
+	var req sendRequest
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, 413, sendResponse{OK: false, Error: fmt.Sprintf("send request too large (max %d bytes)", s.cfg.MaxPromptBytes)})
+			return
+		}
+		writeJSON(w, 400, sendResponse{OK: false, Error: "invalid JSON body"})
+		return
+	}
+	req.ChannelType = strings.TrimSpace(req.ChannelType)
+	req.Channel = strings.TrimSpace(req.Channel)
+	req.MediaPath = strings.TrimSpace(req.MediaPath)
+	if req.ChannelType == "" {
+		writeJSON(w, 400, sendResponse{OK: false, Error: "missing channelType"})
+		return
+	}
+	if strings.ContainsAny(req.ChannelType, ":/\\") {
+		writeJSON(w, 400, sendResponse{OK: false, Error: "invalid channelType"})
+		return
+	}
+	if req.Channel == "" {
+		writeJSON(w, 400, sendResponse{OK: false, Error: "missing channel"})
+		return
+	}
+	if req.Text == "" && req.MediaPath == "" {
+		writeJSON(w, 400, sendResponse{OK: false, Error: "missing text or mediaPath"})
+		return
+	}
+	if req.MediaPath != "" {
+		clean := filepath.Clean(req.MediaPath)
+		if !filepath.IsAbs(clean) || clean != req.MediaPath {
+			writeJSON(w, 400, sendResponse{OK: false, Error: "mediaPath must be absolute and clean"})
+			return
+		}
+		info, err := os.Stat(clean)
+		if err != nil {
+			writeJSON(w, 400, sendResponse{OK: false, Error: fmt.Sprintf("mediaPath unavailable: %v", err)})
+			return
+		}
+		if !info.Mode().IsRegular() {
+			writeJSON(w, 400, sendResponse{OK: false, Error: "mediaPath is not a regular file"})
+			return
+		}
+	}
+	adapter := s.cfg.SendAdapters[req.ChannelType]
+	if adapter == nil {
+		writeJSON(w, 400, sendResponse{OK: false, Error: fmt.Sprintf("unsupported channelType %q", req.ChannelType)})
+		return
+	}
+	res, err := adapter.Send(r.Context(), SendRequest{Channel: req.Channel, Text: req.Text, MediaPath: req.MediaPath, Caption: req.Caption})
+	if err != nil {
+		code := 502
+		if strings.Contains(err.Error(), "not allowed") {
+			code = 403
+		}
+		writeJSON(w, code, sendResponse{OK: false, Error: err.Error()})
+		return
+	}
+	writeJSON(w, 200, sendResponse{OK: true, Channel: req.ChannelType + ":" + req.Channel, Sent: res.Sent})
+}
+
+func (s *Server) mediaStore() (*media.Store, error) {
+	if s.cfg.Sessions != nil {
+		return media.NewStore(s.cfg.Sessions.SessionDir()), nil
+	}
+	if s.cfg.RPCConfig.SessionDir != "" {
+		return media.NewStore(s.cfg.RPCConfig.SessionDir), nil
+	}
+	return nil, errors.New("media store unavailable: session dir is not configured")
 }
 
 // decodeTextDelta extracts the text delta from a message_update event's

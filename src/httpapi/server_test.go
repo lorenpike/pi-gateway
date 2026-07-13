@@ -6,7 +6,9 @@ package httpapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -208,6 +210,26 @@ type sseEvent struct {
 	data string
 }
 
+type fakeSendAdapter struct {
+	last SendRequest
+	err  error
+}
+
+func (a *fakeSendAdapter) Send(ctx context.Context, req SendRequest) (SendResult, error) {
+	a.last = req
+	if a.err != nil {
+		return SendResult{}, a.err
+	}
+	var sent []SentItem
+	if req.Text != "" {
+		sent = append(sent, SentItem{Type: "text", Text: req.Text})
+	}
+	if req.MediaPath != "" {
+		sent = append(sent, SentItem{Type: "media", Path: req.MediaPath})
+	}
+	return SendResult{Sent: sent}, nil
+}
+
 type fakeExporter struct{}
 
 func (fakeExporter) ExportHTML(ctx context.Context, sessionPath string, outputPath string) error {
@@ -328,6 +350,31 @@ func TestSessions_ListAndExport_NoAuth(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "exported "+name) {
 		t.Fatalf("export body = %q", rr.Body.String())
+	}
+}
+
+func TestSend_DirectDeliveryDoesNotPrompt(t *testing.T) {
+	p, ff, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	adapter := &fakeSendAdapter{}
+	s := newServer(t, p, Config{Token: "sekret", SendAdapters: map[string]SendAdapter{"telegram": adapter}})
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", strings.NewReader(`{"channelType":"telegram","channel":"42","text":"hello"}`))
+	req.Header.Set("Authorization", "Bearer sekret")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if adapter.last.Channel != "42" || adapter.last.Text != "hello" {
+		t.Fatalf("adapter request = %+v", adapter.last)
+	}
+	if ff.count() != 0 {
+		t.Fatalf("send should not create an agent turn; fake count=%d", ff.count())
+	}
+	var got sendResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil || !got.OK || len(got.Sent) != 1 {
+		t.Fatalf("response=%+v err=%v", got, err)
 	}
 }
 
@@ -498,6 +545,55 @@ func TestPrompt_OK_StreamsSSE(t *testing.T) {
 	}
 	if text != "Hello world" {
 		t.Fatalf("concatenated delta text = %q, want %q", text, "Hello world")
+	}
+}
+
+func TestPrompt_WithAttachment_SavesFileAndSubmitsFormattedPrompt(t *testing.T) {
+	p, ff, sm := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	s := newServer(t, p, Config{Token: "sekret", Sessions: sm})
+
+	payload := map[string]any{
+		"channelType": "http",
+		"channel":     "c1",
+		"message":     "look",
+		"attachments": []map[string]string{{
+			"fileName": "../photo.jpg",
+			"mimeType": "image/jpeg",
+			"data":     base64.StdEncoding.EncodeToString([]byte("image-bytes")),
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/v1/prompt", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sekret")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var fake *fakePI
+	for _, f := range ff.all() {
+		fake = f
+		break
+	}
+	if fake == nil || !fake.Contains("Attached file: [photo.jpg]") || (!fake.Contains("/media/") && !fake.Contains(`\\media\\`)) {
+		var got []string
+		if fake != nil {
+			got = fake.Got()
+		}
+		t.Fatalf("prompt did not contain attachment link; got %v", got)
+	}
+	encoded := payload["attachments"].([]map[string]string)[0]["data"]
+	if fake.Contains(encoded) {
+		t.Fatalf("prompt contains base64 data; got %v", fake.Got())
+	}
+	matches, err := filepath.Glob(filepath.Join(sm.SessionDir(), "media", "*--photo.jpg"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("saved media matches=%v err=%v", matches, err)
+	}
+	if got, _ := os.ReadFile(matches[0]); string(got) != "image-bytes" {
+		t.Fatalf("saved media contents = %q", got)
 	}
 }
 

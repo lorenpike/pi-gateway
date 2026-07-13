@@ -15,6 +15,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"wall-e/httpapi"
+	"wall-e/media"
 	"wall-e/pool"
 	"wall-e/rpc"
 	"wall-e/session"
@@ -54,13 +57,27 @@ type fakeTelegramAPI struct {
 	actions        []chatAction
 	commands       []BotCommand
 	setCommandsErr error
+	files          map[string]File
+	fileData       map[string]string
+	photos         []sentMedia
+	documents      []sentMedia
+	photoErr       error
+	documentErr    error
 	updates        chan Update // for GetUpdates (poll-loop test)
+}
+
+type sentMedia struct {
+	chatID  int64
+	path    string
+	caption string
 }
 
 func newFakeTelegramAPI(botID int64) *fakeTelegramAPI {
 	return &fakeTelegramAPI{
-		me:      User{ID: botID, IsBot: true, UserName: "wall_e_test_bot"},
-		updates: make(chan Update, 16),
+		me:       User{ID: botID, IsBot: true, UserName: "wall_e_test_bot"},
+		files:    make(map[string]File),
+		fileData: make(map[string]string),
+		updates:  make(chan Update, 16),
 	}
 }
 
@@ -106,6 +123,46 @@ func (a *fakeTelegramAPI) SetMyCommands(ctx context.Context, commands []BotComma
 	defer a.mu.Unlock()
 	a.commands = append([]BotCommand(nil), commands...)
 	return a.setCommandsErr
+}
+
+func (a *fakeTelegramAPI) GetFile(ctx context.Context, fileID string) (File, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	f, ok := a.files[fileID]
+	if !ok {
+		return File{}, errors.New("missing fake file")
+	}
+	return f, nil
+}
+
+func (a *fakeTelegramAPI) DownloadFile(ctx context.Context, filePath string) (io.ReadCloser, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	data, ok := a.fileData[filePath]
+	if !ok {
+		return nil, errors.New("missing fake file data")
+	}
+	return io.NopCloser(strings.NewReader(data)), nil
+}
+
+func (a *fakeTelegramAPI) SendPhoto(ctx context.Context, chatID int64, path string, caption string) (Message, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.photoErr != nil {
+		return Message{}, a.photoErr
+	}
+	a.photos = append(a.photos, sentMedia{chatID: chatID, path: path, caption: caption})
+	return Message{MessageID: int64(len(a.sends) + len(a.photos) + len(a.documents) + 1), Chat: Chat{ID: chatID}}, nil
+}
+
+func (a *fakeTelegramAPI) SendDocument(ctx context.Context, chatID int64, path string, caption string) (Message, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.documentErr != nil {
+		return Message{}, a.documentErr
+	}
+	a.documents = append(a.documents, sentMedia{chatID: chatID, path: path, caption: caption})
+	return Message{MessageID: int64(len(a.sends) + len(a.photos) + len(a.documents) + 1), Chat: Chat{ID: chatID}}, nil
 }
 
 func (a *fakeTelegramAPI) sendCount() int {
@@ -388,6 +445,62 @@ func TestTelegram_MidStreamUserMessage_Steers(t *testing.T) {
 
 // TestTelegram_Over4096Chars_Splits: assistant text > 4096 chars is split
 // across multiple sendMessage calls on agent_end.
+func TestTelegram_InboundDocument_SavesAndPromptsWithLink(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	api.files["file-1"] = File{FileID: "file-1", FilePath: "docs/report.pdf"}
+	api.fileData["docs/report.pdf"] = "pdf-data"
+	script := []scriptedEvent{{kind: "agent_end", delay: 0}}
+	p, ff, sm := testPoolWithManager(t, makeScriptedHandler(script, nil))
+	bot := newTestBot(t, p, api)
+	bot.mediaStore = media.NewStore(sm.SessionDir())
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Caption: "please inspect", Document: &Document{FileID: "file-1", FileName: "report.pdf", MimeType: "application/pdf"}})
+
+	fake := ff.first()
+	if fake == nil || !fake.waitForCommand(`"type":"prompt"`, 2*time.Second) {
+		t.Fatal("prompt not received")
+	}
+	if !fake.contains("please inspect") || !fake.contains("Attached file: [report.pdf]") || (!fake.contains("/media/") && !fake.contains(`\\media\\`)) {
+		t.Fatalf("prompt missing formatted attachment; got %v", fake.Got())
+	}
+	matches, err := filepath.Glob(filepath.Join(sm.SessionDir(), "media", "*--report.pdf"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("saved media matches=%v err=%v", matches, err)
+	}
+	if got, _ := os.ReadFile(matches[0]); string(got) != "pdf-data" {
+		t.Fatalf("saved media contents = %q", got)
+	}
+}
+
+func TestTelegram_SendDirectTextAndMedia(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	p, _ := testPool(t, makeScriptedHandler(nil, nil))
+	bot := newTestBot(t, p, api, 42)
+	file := filepath.Join(t.TempDir(), "photo.png")
+	if err := os.WriteFile(file, []byte("\x89PNG\r\n\x1a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bot.Send(context.Background(), httpapi.SendRequest{Channel: "42", Text: "hello"}); err != nil {
+		t.Fatalf("send text: %v", err)
+	}
+	if got := api.lastSendText(); got != "hello" {
+		t.Fatalf("last text = %q", got)
+	}
+	res, err := bot.Send(context.Background(), httpapi.SendRequest{Channel: "42", MediaPath: file, Caption: "cap"})
+	if err != nil {
+		t.Fatalf("send media: %v", err)
+	}
+	if len(api.photos) != 1 || api.photos[0].caption != "cap" {
+		t.Fatalf("photos = %+v", api.photos)
+	}
+	if len(res.Sent) != 1 || res.Sent[0].Type != "media" {
+		t.Fatalf("send result = %+v", res)
+	}
+	if _, err := bot.Send(context.Background(), httpapi.SendRequest{Channel: "7", Text: "no"}); err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("disallowed send err = %v", err)
+	}
+}
+
 func TestTelegram_Over4096Chars_Splits(t *testing.T) {
 	api := newFakeTelegramAPI(99)
 	bigText := strings.Repeat("x", 5000)

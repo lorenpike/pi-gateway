@@ -24,7 +24,7 @@ TMUX_SESSION := default
 AUTH_FILE := /opt/pi/auth.json
 SETTINGS_FILE := /opt/pi/settings.json
 WALLE_PORT ?= 6007
-MD_FILES := $(shell find $(DOCS)/source -name '*.md')
+MD_FILES := $(shell find $(DOCS)/source -name "*.md")
 
 # Optionally include environment variables
 -include .env

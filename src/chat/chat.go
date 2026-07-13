@@ -23,12 +23,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"wall-e/httpapi"
+	"wall-e/media"
 	"wall-e/pool"
 	"wall-e/rpc"
 	"wall-e/session"
@@ -63,6 +70,14 @@ type TelegramAPI interface {
 	// SetMyCommands registers the bot's Telegram slash-command menu. Failures
 	// are non-fatal to the bot; Start logs and continues.
 	SetMyCommands(ctx context.Context, commands []BotCommand) error
+	// GetFile resolves a Telegram file_id to a downloadable file_path.
+	GetFile(ctx context.Context, fileID string) (File, error)
+	// DownloadFile downloads a Telegram file_path returned by GetFile.
+	DownloadFile(ctx context.Context, filePath string) (io.ReadCloser, error)
+	// SendPhoto sends an image file by path with an optional caption.
+	SendPhoto(ctx context.Context, chatID int64, path string, caption string) (Message, error)
+	// SendDocument sends a general file by path with an optional caption.
+	SendDocument(ctx context.Context, chatID int64, path string, caption string) (Message, error)
 }
 
 // BotCommand is a Telegram bot-command menu entry.
@@ -85,12 +100,63 @@ type Chat struct {
 	Type string `json:"type,omitempty"`
 }
 
+// File is Telegram file metadata returned by getFile.
+type File struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
+	FilePath     string `json:"file_path,omitempty"`
+}
+
+// PhotoSize is one Telegram photo rendition.
+type PhotoSize struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	Width        int    `json:"width,omitempty"`
+	Height       int    `json:"height,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+type Document struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+type Voice struct {
+	FileID   string `json:"file_id"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+type Audio struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+type Video struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
 // Message is a Telegram message.
 type Message struct {
-	MessageID int64  `json:"message_id"`
-	Chat      Chat   `json:"chat"`
-	From      User   `json:"from"`
-	Text      string `json:"text"`
+	MessageID    int64       `json:"message_id"`
+	Chat         Chat        `json:"chat"`
+	From         User        `json:"from"`
+	Text         string      `json:"text"`
+	Caption      string      `json:"caption,omitempty"`
+	Photo        []PhotoSize `json:"photo,omitempty"`
+	Document     *Document   `json:"document,omitempty"`
+	Voice        *Voice      `json:"voice,omitempty"`
+	Audio        *Audio      `json:"audio,omitempty"`
+	Video        *Video      `json:"video,omitempty"`
+	MediaGroupID string      `json:"media_group_id,omitempty"`
 }
 
 // Update is a single Telegram update (we only consume message updates in v1).
@@ -130,6 +196,9 @@ type Config struct {
 	// NewTelegram creates a private manager over Pool (tests/back-compat); main
 	// passes the gateway-wide manager so CLI and Telegram steer each other.
 	Turns *turn.Manager
+	// MediaStore saves inbound Telegram files before the formatted prompt is
+	// submitted. If nil, text-only behavior remains available.
+	MediaStore *media.Store
 }
 
 // Bot is the Telegram front-end. It is a Frontend: Start launches the
@@ -157,6 +226,11 @@ type Bot struct {
 	registerCommands bool
 	commandProvider  func(context.Context) ([]rpc.Command, error)
 	commands         *telegramCommandRegistry
+	mediaStore       *media.Store
+
+	mediaMu            sync.Mutex
+	mediaGroups        map[string]*pendingMediaGroup
+	mediaGroupDebounce time.Duration
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -187,15 +261,18 @@ func NewTelegram(cfg Config, p *pool.Pool, api TelegramAPI) (*Bot, error) {
 		turns = turn.NewManager(context.Background(), p)
 	}
 	return &Bot{
-		api:              api,
-		pool:             p,
-		turns:            turns,
-		allowed:          allowed,
-		editInterval:     1 * time.Second,
-		idleTimeout:      5 * time.Minute,
-		registerCommands: !cfg.DisableCommandRegistration,
-		commandProvider:  cfg.CommandProvider,
-		commands:         newTelegramCommandRegistry(nil),
+		api:                api,
+		pool:               p,
+		turns:              turns,
+		allowed:            allowed,
+		editInterval:       1 * time.Second,
+		idleTimeout:        5 * time.Minute,
+		registerCommands:   !cfg.DisableCommandRegistration,
+		commandProvider:    cfg.CommandProvider,
+		commands:           newTelegramCommandRegistry(nil),
+		mediaStore:         cfg.MediaStore,
+		mediaGroups:        make(map[string]*pendingMediaGroup),
+		mediaGroupDebounce: 500 * time.Millisecond,
 	}, nil
 }
 
@@ -310,9 +387,10 @@ func (b *Bot) Stop(ctx context.Context) error {
 	return nil
 }
 
-// handleMessage routes one incoming message: ignore self / non-text / disallowed
-// chats; if a turn is already active for the chat, steer it; else acquire a slot
-// and run a fresh turn.
+// handleMessage routes one incoming message: ignore self / unsupported /
+// disallowed chats; if a turn is already active for the chat, steer it; else
+// acquire a slot and run a fresh turn. Text/caption plus media from one user
+// action is formatted into one initial prompt after files are saved.
 func (b *Bot) handleMessage(msg Message) {
 	// Ignore our own messages (avoid loops).
 	if msg.From.ID == b.botID {
@@ -322,15 +400,31 @@ func (b *Bot) handleMessage(msg Message) {
 	if len(b.allowed) > 0 && !b.allowed[chatID] {
 		return
 	}
+	if msg.MediaGroupID != "" && messageHasMedia(msg) {
+		b.enqueueMediaGroup(msg)
+		return
+	}
 	text := msg.Text
 	if text == "" {
-		return // v1: only text messages
+		text = msg.Caption
+	}
+	files, err := b.saveTelegramMedia(b.ctx, []Message{msg})
+	if err != nil {
+		_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ could not save attachment: "+err.Error(), 0)
+		return
+	}
+	if text == "" && len(files) == 0 {
+		return
+	}
+	hasFiles := len(files) > 0
+	if hasFiles {
+		text = media.FormatAttachmentPrompt(text, files)
 	}
 	cmdName, cmdArgs, isSlash, addressedToOtherBot := parseTelegramCommandText(text, b.botName)
 	if addressedToOtherBot {
 		return
 	}
-	if isSlash {
+	if isSlash && !hasFiles {
 		if handled, rewritten := b.handleSlashCommand(chatID, cmdName, cmdArgs); handled {
 			return
 		} else if rewritten != "" {
@@ -343,6 +437,174 @@ func (b *Bot) handleMessage(msg Message) {
 	if _, _, err := b.submitTelegramTurn(chatID, text, isSlash, false); err != nil {
 		_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ no agent available: "+err.Error(), 0)
 	}
+}
+
+type pendingMediaGroup struct {
+	chatID int64
+	msgs   []Message
+}
+
+func (b *Bot) enqueueMediaGroup(msg Message) {
+	key := fmt.Sprintf("%d:%s", msg.Chat.ID, msg.MediaGroupID)
+	b.mediaMu.Lock()
+	pg := b.mediaGroups[key]
+	if pg == nil {
+		pg = &pendingMediaGroup{chatID: msg.Chat.ID}
+		b.mediaGroups[key] = pg
+		b.turnsWG.Add(1)
+		time.AfterFunc(b.mediaGroupDebounce, func() {
+			defer b.turnsWG.Done()
+			b.flushMediaGroup(key)
+		})
+	}
+	pg.msgs = append(pg.msgs, msg)
+	b.mediaMu.Unlock()
+}
+
+func (b *Bot) flushMediaGroup(key string) {
+	b.mediaMu.Lock()
+	pg := b.mediaGroups[key]
+	delete(b.mediaGroups, key)
+	b.mediaMu.Unlock()
+	if pg == nil || len(pg.msgs) == 0 {
+		return
+	}
+	text := ""
+	for _, msg := range pg.msgs {
+		if msg.Caption != "" {
+			text = msg.Caption
+			break
+		}
+		if msg.Text != "" {
+			text = msg.Text
+			break
+		}
+	}
+	files, err := b.saveTelegramMedia(b.ctx, pg.msgs)
+	if err != nil {
+		_, _ = b.api.SendMessage(b.ctx, pg.chatID, "⚠️ could not save attachment: "+err.Error(), 0)
+		return
+	}
+	if len(files) == 0 && text == "" {
+		return
+	}
+	if len(files) > 0 {
+		text = media.FormatAttachmentPrompt(text, files)
+	}
+	if _, _, err := b.submitTelegramTurn(pg.chatID, text, false, false); err != nil {
+		_, _ = b.api.SendMessage(b.ctx, pg.chatID, "⚠️ no agent available: "+err.Error(), 0)
+	}
+}
+
+func messageHasMedia(msg Message) bool {
+	return len(msg.Photo) > 0 || msg.Document != nil || msg.Voice != nil || msg.Audio != nil || msg.Video != nil
+}
+
+type telegramMediaRef struct {
+	fileID   string
+	name     string
+	mimeType string
+}
+
+func telegramMediaRefs(msg Message) []telegramMediaRef {
+	var out []telegramMediaRef
+	if len(msg.Photo) > 0 {
+		best := msg.Photo[0]
+		for _, p := range msg.Photo[1:] {
+			if p.FileSize > best.FileSize || (p.FileSize == best.FileSize && p.Width*p.Height > best.Width*best.Height) {
+				best = p
+			}
+		}
+		out = append(out, telegramMediaRef{fileID: best.FileID, name: "photo.jpg"})
+	}
+	if msg.Document != nil {
+		name := msg.Document.FileName
+		if name == "" {
+			name = "document"
+		}
+		out = append(out, telegramMediaRef{fileID: msg.Document.FileID, name: name, mimeType: msg.Document.MimeType})
+	}
+	if msg.Voice != nil {
+		out = append(out, telegramMediaRef{fileID: msg.Voice.FileID, name: "voice.ogg", mimeType: msg.Voice.MimeType})
+	}
+	if msg.Audio != nil {
+		name := msg.Audio.FileName
+		if name == "" {
+			name = "audio"
+		}
+		out = append(out, telegramMediaRef{fileID: msg.Audio.FileID, name: name, mimeType: msg.Audio.MimeType})
+	}
+	if msg.Video != nil {
+		name := msg.Video.FileName
+		if name == "" {
+			name = "video.mp4"
+		}
+		out = append(out, telegramMediaRef{fileID: msg.Video.FileID, name: name, mimeType: msg.Video.MimeType})
+	}
+	return out
+}
+
+func (b *Bot) saveTelegramMedia(ctx context.Context, msgs []Message) ([]media.SavedFile, error) {
+	var refs []telegramMediaRef
+	for _, msg := range msgs {
+		refs = append(refs, telegramMediaRefs(msg)...)
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if b.mediaStore == nil {
+		return nil, errors.New("media store is not configured")
+	}
+	files := make([]media.SavedFile, 0, len(refs))
+	for _, ref := range refs {
+		if ref.fileID == "" {
+			continue
+		}
+		info, err := b.api.GetFile(ctx, ref.fileID)
+		if err != nil {
+			return nil, err
+		}
+		name := ref.name
+		if name == "" || name == "document" || name == "audio" || name == "video.mp4" {
+			if info.FilePath != "" {
+				if base := filepath.Base(info.FilePath); base != "." && base != string(filepath.Separator) && base != "" {
+					name = base
+				}
+			}
+		}
+		rc, err := b.api.DownloadFile(ctx, info.FilePath)
+		if err != nil {
+			return nil, err
+		}
+		saved, saveErr := b.mediaStore.Save(ctx, name, rc)
+		closeErr := rc.Close()
+		if saveErr != nil {
+			return nil, saveErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if ref.mimeType != "" {
+			saved.MimeType = ref.mimeType
+		}
+		files = append(files, saved)
+	}
+	return files, nil
+}
+
+func isImageFile(path string) bool {
+	if f, err := os.Open(path); err == nil {
+		defer f.Close()
+		buf := make([]byte, 512)
+		n, _ := f.Read(buf)
+		if strings.HasPrefix(http.DetectContentType(buf[:n]), "image/") {
+			return true
+		}
+	}
+	if mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(path))); strings.HasPrefix(mt, "image/") {
+		return true
+	}
+	return false
 }
 
 func telegramChannelID(chatID int64) pool.ChannelID {
@@ -398,6 +660,46 @@ func (b *Bot) Prompt(ctx context.Context, channel string, message string) (*turn
 	}
 	sub, _, err := b.submitTelegramTurn(chatID, message, false, true)
 	return sub, err
+}
+
+// Send implements httpapi.SendAdapter for direct Telegram delivery. It does not
+// create an agent turn.
+func (b *Bot) Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResult, error) {
+	chatID, err := strconv.ParseInt(strings.TrimSpace(req.Channel), 10, 64)
+	if err != nil {
+		return httpapi.SendResult{}, fmt.Errorf("invalid telegram channel %q", req.Channel)
+	}
+	if len(b.allowed) > 0 && !b.allowed[chatID] {
+		return httpapi.SendResult{}, fmt.Errorf("telegram chat %d is not allowed", chatID)
+	}
+	var out httpapi.SendResult
+	if req.Text != "" {
+		if _, err := b.api.SendMessage(ctx, chatID, req.Text, 0); err != nil {
+			return out, err
+		}
+		out.Sent = append(out.Sent, httpapi.SentItem{Type: "text", Text: req.Text})
+	}
+	if req.MediaPath != "" {
+		caption := req.Caption
+		if len([]rune(caption)) > 1024 {
+			if _, err := b.api.SendMessage(ctx, chatID, caption, 0); err != nil {
+				return out, err
+			}
+			out.Sent = append(out.Sent, httpapi.SentItem{Type: "text", Text: caption})
+			caption = ""
+		}
+		if isImageFile(req.MediaPath) {
+			if _, err := b.api.SendPhoto(ctx, chatID, req.MediaPath, caption); err == nil {
+				out.Sent = append(out.Sent, httpapi.SentItem{Type: "media", Path: req.MediaPath})
+				return out, nil
+			}
+		}
+		if _, err := b.api.SendDocument(ctx, chatID, req.MediaPath, caption); err != nil {
+			return out, err
+		}
+		out.Sent = append(out.Sent, httpapi.SentItem{Type: "media", Path: req.MediaPath})
+	}
+	return out, nil
 }
 
 func (b *Bot) handleSlashCommand(chatID int64, cmdName, args string) (handled bool, rewritten string) {

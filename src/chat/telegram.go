@@ -20,7 +20,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -166,6 +170,105 @@ func (h *httpAPI) SetMyCommands(ctx context.Context, commands []BotCommand) erro
 	payload := map[string]any{"commands": commands}
 	if err := h.call(ctx, "setMyCommands", payload, nil); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (h *httpAPI) GetFile(ctx context.Context, fileID string) (File, error) {
+	var f File
+	if err := h.call(ctx, "getFile", map[string]any{"file_id": fileID}, &f); err != nil {
+		return File{}, err
+	}
+	return f, nil
+}
+
+func (h *httpAPI) DownloadFile(ctx context.Context, filePath string) (io.ReadCloser, error) {
+	if filePath == "" {
+		return nil, fmt.Errorf("telegram: empty file_path")
+	}
+	url := fmt.Sprintf("%s/file/bot%s/%s", h.base, h.token, filePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: file request: %w", err)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: download file: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("telegram: download file failed: %s %s", resp.Status, string(data))
+	}
+	return resp.Body, nil
+}
+
+func (h *httpAPI) SendPhoto(ctx context.Context, chatID int64, path string, caption string) (Message, error) {
+	var msg Message
+	if err := h.callMultipart(ctx, "sendPhoto", path, "photo", chatID, caption, &msg); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+func (h *httpAPI) SendDocument(ctx context.Context, chatID int64, path string, caption string) (Message, error) {
+	var msg Message
+	if err := h.callMultipart(ctx, "sendDocument", path, "document", chatID, caption, &msg); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+func (h *httpAPI) callMultipart(ctx context.Context, method string, path string, field string, chatID int64, caption string, result any) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("telegram: open upload: %w", err)
+	}
+	defer file.Close()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	if caption != "" {
+		_ = mw.WriteField("caption", renderTelegramMarkdown(caption))
+		_ = mw.WriteField("parse_mode", telegramParseModeHTML)
+	}
+	part, err := mw.CreateFormFile(field, filepath.Base(path))
+	if err != nil {
+		return fmt.Errorf("telegram: create upload part: %w", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return fmt.Errorf("telegram: copy upload: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return fmt.Errorf("telegram: close upload: %w", err)
+	}
+	url := fmt.Sprintf("%s/bot%s/%s", h.base, h.token, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
+	if err != nil {
+		return fmt.Errorf("telegram: request %s: %w", method, err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram: call %s: %w", method, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("telegram: read %s: %w", method, err)
+	}
+	var env tgResponse
+	if err := json.Unmarshal(data, &env); err != nil {
+		return fmt.Errorf("telegram: decode %s: %w", method, err)
+	}
+	if !env.OK {
+		return fmt.Errorf("telegram: %s failed: %s (code %d)", method, env.Description, env.ErrorCode)
+	}
+	if result != nil && len(env.Result) > 0 {
+		if err := json.Unmarshal(env.Result, result); err != nil {
+			return fmt.Errorf("telegram: decode %s result: %w", method, err)
+		}
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,6 +34,7 @@ import (
 	"wall-e/chat"
 	"wall-e/config"
 	"wall-e/httpapi"
+	"wall-e/media"
 	"wall-e/pool"
 	"wall-e/rpc"
 	"wall-e/session"
@@ -75,6 +78,8 @@ func mainWithArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 			return 1
 		}
 		return 0
+	case "send":
+		return runSendCommand(context.Background(), args[1:], stdin, stdout)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -85,12 +90,15 @@ func mainWithArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   wall-e run
-  wall-e msg <type:id>
+  wall-e msg <type:id> [--file PATH ...]
+  wall-e send <type:id> [text]
+  wall-e send --media <type:id> <filepath> [--caption "..."]
   wall-e --help
 
 Commands:
   run             start the gateway server
   msg <type:id>   read a prompt from stdin and submit it to /v1/prompt
+  send <type:id>  send text/media directly to a channel via /v1/send
 
 Environment for msg:
   WALLE_PORT         local gateway port (default 6007)
@@ -101,21 +109,33 @@ Environment for msg:
 
 const cliMaxPromptBytes = 8 << 20
 
+type cliPromptAttachment struct {
+	FileName string `json:"fileName"`
+	MimeType string `json:"mimeType,omitempty"`
+	Data     string `json:"data"`
+}
+
 type cliPromptRequest struct {
-	ChannelType string `json:"channelType"`
-	Channel     string `json:"channel"`
-	Message     string `json:"message"`
+	ChannelType string                 `json:"channelType"`
+	Channel     string                 `json:"channel"`
+	Message     string                 `json:"message"`
+	Attachments *[]cliPromptAttachment `json:"attachments,omitempty"`
 }
 
 func runMsgCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) error {
-	if len(args) != 1 {
-		return errors.New("usage: wall-e msg <type:id>")
+	channelArg, fileArgs, err := parseMsgArgs(args)
+	if err != nil {
+		return err
 	}
-	channelType, channel, err := parseChannelAddress(args[0])
+	channelType, channel, err := parseChannelAddress(channelArg)
 	if err != nil {
 		return err
 	}
 	prompt, err := readPromptStdin(stdin)
+	if err != nil {
+		return err
+	}
+	attachments, err := readCLIAttachments(fileArgs)
 	if err != nil {
 		return err
 	}
@@ -142,7 +162,7 @@ func runMsgCommand(ctx context.Context, args []string, stdin io.Reader, stdout i
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	body, err := json.Marshal(cliPromptRequest{ChannelType: channelType, Channel: channel, Message: prompt})
+	body, err := json.Marshal(cliPromptRequest{ChannelType: channelType, Channel: channel, Message: prompt, Attachments: attachmentPtr(attachments)})
 	if err != nil {
 		return err
 	}
@@ -167,6 +187,188 @@ func runMsgCommand(ctx context.Context, args []string, stdin io.Reader, stdout i
 		return fmt.Errorf("gateway returned %s: %s", resp.Status, msg)
 	}
 	return consumeSSE(resp.Body, stdout)
+}
+
+type cliSendRequest struct {
+	ChannelType string `json:"channelType"`
+	Channel     string `json:"channel"`
+	Text        string `json:"text,omitempty"`
+	MediaPath   string `json:"mediaPath,omitempty"`
+	Caption     string `json:"caption,omitempty"`
+}
+
+type cliSendStatus struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+func runSendCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) int {
+	req, err := parseSendArgs(args, stdin)
+	if err != nil {
+		writeCLIStatus(stdout, false, err.Error())
+		return 2
+	}
+	token := os.Getenv("WALLE_TOKEN")
+	if token == "" {
+		writeCLIStatus(stdout, false, "WALLE_TOKEN is required")
+		return 1
+	}
+	port := os.Getenv("WALLE_PORT")
+	if port == "" {
+		port = "6007"
+	}
+	timeout := 30 * time.Minute
+	if v := os.Getenv("WALLE_MSG_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			writeCLIStatus(stdout, false, fmt.Sprintf("invalid WALLE_MSG_TIMEOUT %q", v))
+			return 1
+		}
+		timeout = d
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	body, err := json.Marshal(req)
+	if err != nil {
+		writeCLIStatus(stdout, false, err.Error())
+		return 1
+	}
+	url := "http://127.0.0.1:" + port + "/v1/send"
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		writeCLIStatus(stdout, false, err.Error())
+		return 1
+	}
+	hreq.Header.Set("Authorization", "Bearer "+token)
+	hreq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(hreq)
+	if err != nil {
+		writeCLIStatus(stdout, false, err.Error())
+		return 1
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if len(bytes.TrimSpace(data)) == 0 {
+		writeCLIStatus(stdout, false, resp.Status)
+		return 1
+	}
+	_, _ = stdout.Write(data)
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		_, _ = io.WriteString(stdout, "\n")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 1
+	}
+	return 0
+}
+
+func parseSendArgs(args []string, stdin io.Reader) (cliSendRequest, error) {
+	if len(args) == 0 {
+		return cliSendRequest{}, errors.New("usage: wall-e send <type:id> [text]")
+	}
+	if args[0] == "--media" {
+		if len(args) < 3 {
+			return cliSendRequest{}, errors.New("usage: wall-e send --media <type:id> <filepath> [--caption ...]")
+		}
+		channelType, channel, err := parseChannelAddress(args[1])
+		if err != nil {
+			return cliSendRequest{}, err
+		}
+		path, err := filepath.Abs(args[2])
+		if err != nil {
+			return cliSendRequest{}, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return cliSendRequest{}, fmt.Errorf("media unavailable: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return cliSendRequest{}, errors.New("media path is not a regular file")
+		}
+		var caption string
+		for i := 3; i < len(args); i++ {
+			if args[i] != "--caption" || i+1 >= len(args) {
+				return cliSendRequest{}, errors.New("usage: wall-e send --media <type:id> <filepath> [--caption ...]")
+			}
+			caption = args[i+1]
+			i++
+		}
+		return cliSendRequest{ChannelType: channelType, Channel: channel, MediaPath: filepath.Clean(path), Caption: caption}, nil
+	}
+	channelType, channel, err := parseChannelAddress(args[0])
+	if err != nil {
+		return cliSendRequest{}, err
+	}
+	text := ""
+	if len(args) > 1 {
+		text = strings.Join(args[1:], " ")
+	} else {
+		data, err := io.ReadAll(io.LimitReader(stdin, cliMaxPromptBytes+1))
+		if err != nil {
+			return cliSendRequest{}, err
+		}
+		if len(data) > cliMaxPromptBytes {
+			return cliSendRequest{}, fmt.Errorf("text too large (max %d bytes)", cliMaxPromptBytes)
+		}
+		text = string(data)
+	}
+	if strings.TrimSpace(text) == "" {
+		return cliSendRequest{}, errors.New("empty text")
+	}
+	return cliSendRequest{ChannelType: channelType, Channel: channel, Text: text}, nil
+}
+
+func writeCLIStatus(w io.Writer, ok bool, msg string) {
+	st := cliSendStatus{OK: ok}
+	if !ok {
+		st.Error = msg
+	}
+	b, _ := json.Marshal(st)
+	_, _ = w.Write(append(b, '\n'))
+}
+
+func attachmentPtr(in []cliPromptAttachment) *[]cliPromptAttachment {
+	if len(in) == 0 {
+		return nil
+	}
+	return &in
+}
+
+func parseMsgArgs(args []string) (channel string, files []string, err error) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--file", "--media":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("%s requires a path", args[i])
+			}
+			files = append(files, args[i+1])
+			i++
+		default:
+			if channel != "" {
+				return "", nil, errors.New("usage: wall-e msg <type:id> [--file PATH ...]")
+			}
+			channel = args[i]
+		}
+	}
+	if channel == "" {
+		return "", nil, errors.New("usage: wall-e msg <type:id> [--file PATH ...]")
+	}
+	return channel, files, nil
+}
+
+func readCLIAttachments(paths []string) ([]cliPromptAttachment, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	out := make([]cliPromptAttachment, 0, len(paths))
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read attachment %q: %w", p, err)
+		}
+		out = append(out, cliPromptAttachment{FileName: filepath.Base(p), Data: base64.StdEncoding.EncodeToString(data)})
+	}
+	return out, nil
 }
 
 func parseChannelAddress(s string) (channelType, channel string, err error) {
@@ -332,6 +534,8 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 	turns := turn.NewManager(ctx, p)
 
+	mediaStore := media.NewStore(cfg.SessionDir)
+
 	// 5. Optional chat front-ends. Telegram is started only if a bot token is
 	//    configured; otherwise the gateway serves HTTP alone. A Start failure
 	//    (e.g. bad token / network) is logged but non-fatal — HTTP still serves.
@@ -343,6 +547,7 @@ func run(ctx context.Context, cfg config.Config) error {
 			DisableCommandRegistration: !cfg.Chat.Telegram.RegisterCommands,
 			CommandProvider:            telegramCommandProvider(cfg.RPC),
 			Turns:                      turns,
+			MediaStore:                 mediaStore,
 		}, p, nil)
 		if err != nil {
 			log.Printf("telegram: disabled: %v", err)
@@ -354,6 +559,10 @@ func run(ctx context.Context, cfg config.Config) error {
 				cfg.HTTP.PromptAdapters = make(map[string]httpapi.PromptAdapter)
 			}
 			cfg.HTTP.PromptAdapters["telegram"] = tb
+			if cfg.HTTP.SendAdapters == nil {
+				cfg.HTTP.SendAdapters = make(map[string]httpapi.SendAdapter)
+			}
+			cfg.HTTP.SendAdapters["telegram"] = tb
 			log.Printf("telegram: front-end started")
 		}
 	} else {
