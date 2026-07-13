@@ -688,13 +688,23 @@ func (b *Bot) Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendRe
 			out.Sent = append(out.Sent, httpapi.SentItem{Type: "text", Text: caption})
 			caption = ""
 		}
+		var photoErr error
 		if isImageFile(req.MediaPath) {
 			if _, err := b.api.SendPhoto(ctx, chatID, req.MediaPath, caption); err == nil {
 				out.Sent = append(out.Sent, httpapi.SentItem{Type: "media", Path: req.MediaPath})
 				return out, nil
+			} else if !isTelegramPhotoRejection(err) {
+				// A timeout or transport error has an unknown delivery outcome.
+				// Retrying as a document may duplicate a photo Telegram accepted.
+				return out, err
+			} else {
+				photoErr = err
 			}
 		}
 		if _, err := b.api.SendDocument(ctx, chatID, req.MediaPath, caption); err != nil {
+			if photoErr != nil {
+				return out, fmt.Errorf("%v; sendDocument fallback failed: %w", photoErr, err)
+			}
 			return out, err
 		}
 		out.Sent = append(out.Sent, httpapi.SentItem{Type: "media", Path: req.MediaPath})

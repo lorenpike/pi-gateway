@@ -1,10 +1,10 @@
 # TODO
 
-- [ ] Investigate slow and misleading `wall-e send --media` failures.
-  - Sending a 2180×1820 PNG (163 KB) to Telegram repeatedly took 30–180 seconds before failing with `sendDocument: context deadline exceeded ... while awaiting headers`.
-  - Telegram itself was reachable, and a direct `sendPhoto` API call with the same PNG succeeded immediately, suggesting the issue is in the `wall-e send` document/upload path or its HTTP timeout handling.
-  - After resizing to a 1200×1002 JPEG (94 KB), `wall-e send --media` succeeded.
-  - Improve timeout/error reporting and consider using Telegram's photo endpoint for supported image formats.
+- [x] Fix slow and misleading `wall-e send --media` failures.
+  - The image path already used `sendPhoto`, but any photo error—including an ambiguous transport timeout—was silently discarded before retrying with `sendDocument`. Two sequential timeouts could therefore take 30–180 seconds and report only the misleading document error.
+  - Telegram polling also mutated the timeout on the shared `http.Client` while sends used it concurrently, and the persistent HTTP/2 connection had no health check. During the reported incident, gateway logs showed `getUpdates` and `sendChatAction` timing out too, confirming this was not specific to PNG dimensions.
+  - Fixed by using a context deadline for long polling without mutating the client, health-checking persistent HTTP/2 connections, falling back to `sendDocument` only after a definitive Telegram rejection, and preserving the original photo error when fallback fails.
+  - Transport errors now redact the token-bearing Telegram URL before reaching logs or `/v1/send` JSON.
 
 - [ ] Install skill npm dependencies at Docker build time.
   - Some skills require `npm install` before they can run.

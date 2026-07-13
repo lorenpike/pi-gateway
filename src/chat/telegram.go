@@ -18,10 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +31,12 @@ import (
 )
 
 const defaultTelegramBaseURL = "https://api.telegram.org"
+
+const (
+	telegramHTTPTimeout       = 60 * time.Second
+	telegramHTTP2PingInterval = 15 * time.Second
+	telegramHTTP2PingTimeout  = 5 * time.Second
+)
 
 // httpAPI is the real TelegramAPI over net/http.
 type httpAPI struct {
@@ -38,11 +46,20 @@ type httpAPI struct {
 }
 
 func newHTTPTelegramAPI(token, base string) TelegramAPI {
+	// Telegram long-polling keeps one HTTP/2 connection active indefinitely.
+	// Health-check that connection so a silently blackholed connection is
+	// closed instead of making getUpdates and unrelated sends all wait for the
+	// full client timeout while a fresh curl connection works normally.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.HTTP2 = &http.HTTP2Config{
+		SendPingTimeout: telegramHTTP2PingInterval,
+		PingTimeout:     telegramHTTP2PingTimeout,
+	}
 	return &httpAPI{
 		token: token,
 		base:  base,
 		// Long-poll getUpdates may block ~30s; allow generous headroom.
-		client: &http.Client{Timeout: 60 * time.Second},
+		client: &http.Client{Transport: transport, Timeout: telegramHTTPTimeout},
 	}
 }
 
@@ -52,6 +69,39 @@ type tgResponse struct {
 	Description string          `json:"description,omitempty"`
 	ErrorCode   int             `json:"error_code,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
+}
+
+// telegramAPIError represents a definitive JSON error returned by Telegram.
+// Keeping it distinct from transport errors lets callers safely fall back only
+// when Telegram rejected an operation, rather than retrying an upload whose
+// outcome is unknown after a timeout.
+type telegramAPIError struct {
+	Method      string
+	Description string
+	Code        int
+}
+
+func (e *telegramAPIError) Error() string {
+	return fmt.Sprintf("telegram: %s failed: %s (code %d)", e.Method, e.Description, e.Code)
+}
+
+func isTelegramPhotoRejection(err error) bool {
+	var apiErr *telegramAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusRequestEntityTooLarge
+}
+
+// telegramTransportError strips net/url.Error's URL before wrapping its cause.
+// Telegram API URLs contain the bot token, so returning url.Error directly
+// would expose the token in logs and /v1/send error JSON.
+func telegramTransportError(operation string, err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+	return fmt.Errorf("telegram: %s: %w", operation, err)
 }
 
 func (h *httpAPI) call(ctx context.Context, method string, payload map[string]any, result any) error {
@@ -73,7 +123,7 @@ func (h *httpAPI) call(ctx context.Context, method string, payload map[string]an
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram: call %s: %w", method, err)
+		return telegramTransportError("call "+method, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
@@ -85,7 +135,7 @@ func (h *httpAPI) call(ctx context.Context, method string, payload map[string]an
 		return fmt.Errorf("telegram: decode %s: %w", method, err)
 	}
 	if !env.OK {
-		return fmt.Errorf("telegram: %s failed: %s (code %d)", method, env.Description, env.ErrorCode)
+		return &telegramAPIError{Method: method, Description: env.Description, Code: env.ErrorCode}
 	}
 	if result != nil && len(env.Result) > 0 {
 		if err := json.Unmarshal(env.Result, result); err != nil {
@@ -111,13 +161,15 @@ func (h *httpAPI) GetUpdates(ctx context.Context, offset int64, timeout int) ([]
 	if offset > 0 {
 		payload["offset"] = offset
 	}
-	// Override the client timeout for long-poll: timeout (sec) + headroom.
-	saved := h.client.Timeout
-	h.client.Timeout = time.Duration(timeout)*time.Second + 10*time.Second
-	defer func() { h.client.Timeout = saved }()
+	// Bound this long-poll through its context. Never mutate the shared
+	// http.Client: SendMessage/uploads run concurrently with polling, and
+	// changing Client.Timeout races with those requests and gives them the
+	// poll-specific deadline.
+	pollCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second+10*time.Second)
+	defer cancel()
 
 	var ups []Update
-	if err := h.call(ctx, "getUpdates", payload, &ups); err != nil {
+	if err := h.call(pollCtx, "getUpdates", payload, &ups); err != nil {
 		return nil, err
 	}
 	return ups, nil
@@ -193,7 +245,7 @@ func (h *httpAPI) DownloadFile(ctx context.Context, filePath string) (io.ReadClo
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("telegram: download file: %w", err)
+		return nil, telegramTransportError("download file", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -251,7 +303,7 @@ func (h *httpAPI) callMultipart(ctx context.Context, method string, path string,
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram: call %s: %w", method, err)
+		return telegramTransportError("call "+method, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
@@ -263,7 +315,7 @@ func (h *httpAPI) callMultipart(ctx context.Context, method string, path string,
 		return fmt.Errorf("telegram: decode %s: %w", method, err)
 	}
 	if !env.OK {
-		return fmt.Errorf("telegram: %s failed: %s (code %d)", method, env.Description, env.ErrorCode)
+		return &telegramAPIError{Method: method, Description: env.Description, Code: env.ErrorCode}
 	}
 	if result != nil && len(env.Result) > 0 {
 		if err := json.Unmarshal(env.Result, result); err != nil {

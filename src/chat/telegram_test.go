@@ -16,6 +16,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -498,6 +501,103 @@ func TestTelegram_SendDirectTextAndMedia(t *testing.T) {
 	}
 	if _, err := bot.Send(context.Background(), httpapi.SendRequest{Channel: "7", Text: "no"}); err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("disallowed send err = %v", err)
+	}
+}
+
+func TestTelegram_SendPhotoTransportFailureDoesNotFallback(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	api.photoErr = context.DeadlineExceeded
+	p, _ := testPool(t, makeScriptedHandler(nil, nil))
+	bot := newTestBot(t, p, api, 42)
+	file := filepath.Join(t.TempDir(), "photo.png")
+	if err := os.WriteFile(file, []byte("\x89PNG\r\n\x1a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := bot.Send(context.Background(), httpapi.SendRequest{Channel: "42", MediaPath: file})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("send err = %v, want deadline exceeded", err)
+	}
+	if len(api.documents) != 0 {
+		t.Fatalf("ambiguous photo failure must not fall back; documents=%+v", api.documents)
+	}
+}
+
+func TestTelegram_SendPhotoBadRequestFallsBackToDocument(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	api.photoErr = &telegramAPIError{Method: "sendPhoto", Description: "PHOTO_INVALID_DIMENSIONS", Code: 400}
+	p, _ := testPool(t, makeScriptedHandler(nil, nil))
+	bot := newTestBot(t, p, api, 42)
+	file := filepath.Join(t.TempDir(), "photo.png")
+	if err := os.WriteFile(file, []byte("\x89PNG\r\n\x1a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := bot.Send(context.Background(), httpapi.SendRequest{Channel: "42", MediaPath: file})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(api.photos) != 0 || len(api.documents) != 1 {
+		t.Fatalf("photos=%+v documents=%+v", api.photos, api.documents)
+	}
+	if len(res.Sent) != 1 || res.Sent[0].Type != "media" {
+		t.Fatalf("send result = %+v", res)
+	}
+}
+
+func TestTelegram_HTTPClientHealthChecksPersistentHTTP2Connection(t *testing.T) {
+	api, ok := newHTTPTelegramAPI("test", "https://example.invalid").(*httpAPI)
+	if !ok {
+		t.Fatal("newHTTPTelegramAPI did not return *httpAPI")
+	}
+	transport, ok := api.client.Transport.(*http.Transport)
+	if !ok || transport.HTTP2 == nil {
+		t.Fatalf("transport = %#v, want HTTP/2 health configuration", api.client.Transport)
+	}
+	if transport.HTTP2.SendPingTimeout != telegramHTTP2PingInterval || transport.HTTP2.PingTimeout != telegramHTTP2PingTimeout {
+		t.Fatalf("HTTP/2 health config = %+v", transport.HTTP2)
+	}
+}
+
+func TestTelegram_GetUpdatesDoesNotMutateSharedClientTimeout(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(received)
+		<-release
+		_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	api := &httpAPI{token: "test", base: srv.URL, client: client}
+	done := make(chan error, 1)
+	go func() {
+		_, err := api.GetUpdates(context.Background(), 0, 30)
+		done <- err
+	}()
+	<-received
+	if client.Timeout != 60*time.Second {
+		t.Fatalf("shared client timeout changed during poll: %v", client.Timeout)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("GetUpdates: %v", err)
+	}
+}
+
+func TestTelegram_TransportErrorsDoNotExposeBotToken(t *testing.T) {
+	const token = "123456:super-secret-token"
+	err := telegramTransportError("call sendPhoto", &url.Error{
+		Op:  "Post",
+		URL: "https://api.telegram.org/bot" + token + "/sendPhoto",
+		Err: context.DeadlineExceeded,
+	})
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("transport error exposed bot token: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("transport error lost deadline cause: %v", err)
 	}
 }
 
