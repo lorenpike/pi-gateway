@@ -466,7 +466,7 @@ async function postPrompt(message, allowTokenPrompt) {
   const res = await fetch('/v1/prompt', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ channel, message }),
+    body: JSON.stringify({ channelType: 'http', channel, message }),
   });
   if (res.status === 401 && allowTokenPrompt) {
     if (promptForToken() === null) return res;

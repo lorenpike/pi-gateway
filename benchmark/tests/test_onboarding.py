@@ -7,7 +7,6 @@ TIMEOUT = 120  # seconds
 
 
 def test_onboarding():
-
     stop_word = "hotcakes"
     client = Client(f"""\
         Your name is Matt. You are an personal tax accountant at Acme Accounting.
