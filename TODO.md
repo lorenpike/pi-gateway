@@ -10,9 +10,9 @@
   - Some skills require `npm install` before they can run.
   - Detect skills with `package.json` and run install during the Docker image build so runtime startup/use does not pay this cost.
 
-- [ ] Fix markdown-to-HTML parsing; see Appendix A.
+- [x] Fix markdown-to-HTML parsing; see Appendix A.
 
-- [ ] Manage additional message modalities.
+- [x] Manage additional message modalities.
   - Support images.
   - Support speech/audio.
 

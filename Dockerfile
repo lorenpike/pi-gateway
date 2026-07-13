@@ -11,6 +11,7 @@ RUN apt update && apt install -y \
     cron \
     curl \
     fd-find \
+    file \
     gh \
     git \
     gnupg \
