@@ -77,6 +77,10 @@ test:
 		go test -count=1 ./...; \
 	fi
 
+.PHONY: bench # Run the benchmark harness
+bench:
+	@cd benchmark && uv run walle-bench
+
 .PHONY: clean # Clean build artifacts
 clean:
 	@echo 'Cleaning up...'

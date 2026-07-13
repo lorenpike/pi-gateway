@@ -13,7 +13,8 @@ from .docker import Container
 class Agent:
     """Benchmark target backed by a wall-e Docker container."""
 
-    def __init__(self):
+    def __init__(self, clean: bool = False) -> None:
+        self.auto_clean = clean
         self.container = Container()
         self.channel = f"bench-{secrets.token_hex(6)}"
         self.messages: list[tuple[str, str]] = []
@@ -39,7 +40,10 @@ class Agent:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.stop()
+        if self.auto_clean:
+            self.clean()
+        else:
+            self.stop()
 
     def __call__(self, message: str | None) -> str:
         if message is None:

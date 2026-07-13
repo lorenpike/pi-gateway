@@ -3,7 +3,7 @@ name = "walle-bench"
 version = "0.1.0"
 description = "Benchmark harness for wall-e agent behavior"
 requires-python = ">=3.11"
-dependencies = ["requests", "jmespath"]
+dependencies = ["click", "requests", "jmespath"]
 
 [project.scripts]
 walle-bench = "walle_bench.cli:main"

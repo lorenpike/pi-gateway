@@ -20,7 +20,7 @@ def test_onboarding():
         """)
 
     response = None
-    with timeout(TIMEOUT), Agent() as agent:
+    with timeout(TIMEOUT), Agent(clean=True) as agent:
         for bot in islice(cycle([client, agent]), MAX_TURNS):
             response = bot(response)
 
@@ -29,16 +29,13 @@ def test_onboarding():
         else:
             raise RuntimeError("Exceeded max turns")
 
-    context_md = (agent.workspace / "CONTEXT.md").read_text()
+        context_md = (agent.workspace / "CONTEXT.md").read_text()
 
-    assert "Matt" in context_md
-    assert "Ava" in context_md
-    assert "Acme Accounting" in context_md
-    assert "Winnipeg" in context_md
-    assert "<to-be-deleted>" not in context_md
-
-    # agent.clean()
-    print(agent.workspace)
+        assert "Matt" in context_md
+        assert "Ava" in context_md
+        assert "Acme Accounting" in context_md
+        assert "Winnipeg" in context_md
+        assert "<to-be-deleted>" not in context_md
 
 
 def runner():

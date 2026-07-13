@@ -14,7 +14,7 @@ def test_remembers_favorite_colour():
         but I want to change it to #FFBD2E because it is my favorite colour.
         """)
 
-    with timeout(TIMEOUT), Agent() as agent:
+    with timeout(TIMEOUT), Agent(clean=True) as agent:
         (agent.workspace / "CONTEXT.md").write_text(
             (static / "contexts" / "carl.md").read_text()
         )
