@@ -6,7 +6,7 @@
   - Fixed by using a context deadline for long polling without mutating the client, health-checking persistent HTTP/2 connections, falling back to `sendDocument` only after a definitive Telegram rejection, and preserving the original photo error when fallback fails.
   - Transport errors now redact the token-bearing Telegram URL before reaching logs or `/v1/send` JSON.
 
-- [ ] Install skill npm dependencies at Docker build time.
+- [x] Install skill npm dependencies at Docker build time.
   - Some skills require `npm install` before they can run.
   - Detect skills with `package.json` and run install during the Docker image build so runtime startup/use does not pay this cost.
 
