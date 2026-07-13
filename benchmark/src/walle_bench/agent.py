@@ -52,7 +52,7 @@ class Agent:
         response = requests.post(
             f"{self.container.url}/v1/prompt",
             headers={"Authorization": f"Bearer {self.container.token}"},
-            json={"channel": self.channel, "message": message},
+            json={"channelType": "http", "channel": self.channel, "message": message},
             stream=True,
             timeout=300,
         )
