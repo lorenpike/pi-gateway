@@ -6,6 +6,7 @@ RUN CGO_ENABLED=0 GOOS=linux cd src && go build -trimpath -o /usr/local/bin/wall
 FROM ubuntu:24.04
 
 RUN apt update && apt install -y \
+    at \
     build-essential \
     ca-certificates \
     cron \

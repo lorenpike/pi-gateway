@@ -1,8 +1,8 @@
 # Cron jobs
 
-The container runs Ubuntu `cron` under supervisor for short periodic commands.
-Use cron for scheduled one-shot work only; use supervisor for persistent
-services, servers, daemons, or watchers.
+The container runs Ubuntu `cron` under supervisor for short recurring commands.
+Use `at` for work that should run once, and supervisor for persistent services,
+servers, daemons, or watchers.
 
 ## Persistence model
 
@@ -157,6 +157,7 @@ tail /var/log/wall-e/cron/my-job.log
   cron.
 - Never edit `/var/spool/cron`, `/etc/crontab`, or `/etc/cron.d` directly unless
   the user explicitly asks for admin cron.
+- Use `at`, not cron, for one-off scheduled jobs.
 - Use supervisor, not cron, for persistent daemons.
 - Remember that `wall-e` has passwordless sudo, so cron is a scheduling
   convenience, not a privilege boundary.

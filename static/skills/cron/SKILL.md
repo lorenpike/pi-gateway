@@ -1,12 +1,13 @@
 ---
 name: cron
-description: Create, inspect, and maintain short periodic jobs.
+description: Create, inspect, and maintain short recurring jobs.
 ---
 
 # Cron Jobs
 
-Use cron only for small periodic commands. Use supervisor for long-running
-services, servers, daemons, watchers, or anything that should stay running.
+Use cron only for small recurring commands. Use `at` for jobs that should run
+once, and supervisor for long-running services, servers, daemons, watchers, or
+anything that should stay running.
 
 ## Persistence model
 

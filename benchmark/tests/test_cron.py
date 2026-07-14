@@ -22,3 +22,21 @@ def test_sets_up_rio_weather_cron():
     assert "rio" in response, f"Rio cron job missing from response: {response}"
     assert "weather" in response, f"weather cron job missing from response: {response}"
     assert "hour" in response, f"hourly schedule missing from response: {response}"
+
+
+def test_set_reminder_to_mail_mom():
+    prompt = dedent("""\
+        Set a reminder to mail my mom a birthday card at 4:45pm today.
+        """)
+
+    with timeout(TIMEOUT), Agent(clean=True) as agent:
+        seed("contexts/minimal.md", agent.workspace / "CONTEXT.md")
+        _ = agent(prompt)
+
+        agent.new_session()
+        response = agent("What jobs are currently scheduled with `at`?")
+
+    response = response.lower()
+    assert "mail" in response, f"mail job missing from response: {response}"
+    assert "mom" in response, f"mom job missing from response: {response}"
+    assert "4:45" in response, f"4:45pm time missing from response: {response}"
