@@ -148,6 +148,83 @@ reload only on an explicit signal/command in v1; hot watching is unnecessary.
 `policy_file` is private backend guidance and must never be loaded into the
 front agent.
 
+## Operator control plane
+
+Operators must be able to manage contact and backend channels from their normal
+operator conversations. Channel management is a control-plane operation;
+`wall-e msg` remains the data-plane operation used to converse with an existing
+backend channel.
+
+Add a local administration CLI:
+
+```text
+wall-e contact list
+wall-e contact show <contact-id>
+wall-e contact create telegram:<user-id> --name <name> \
+  --policy <file> --context <file>
+wall-e contact update <contact-id> [--policy <file>] [--context <file>]
+wall-e contact disable <contact-id>
+wall-e contact enable <contact-id>
+wall-e contact destroy <contact-id> --confirm <contact-id>
+```
+
+The operator agent already has tools and may invoke this CLI in response to
+natural-language requests such as "let Alice talk to the bot using this policy."
+Add an operator-only skill documenting the commands and requiring the agent to
+summarize destructive changes before executing them.
+
+The CLI talks to a loopback-only control endpoint or Unix socket. The control
+API must not be exposed through nginx, the public HTTP listener, the contact
+bridge, or the contact process. The gateway validates that the originating
+channel is configured as an operator channel. Contact-facing agents receive no
+control credential and no generic `bash` tool.
+
+The gateway owns a registry mapping external identities to internal channels:
+
+```go
+type ContactRecord struct {
+    ID               string
+    Status           string // "enabled", "disabled", "destroying"
+    Principal        Principal
+    Audience         Audience
+    BackendChannelID string // server-generated UUID; never model-selected
+    PolicyFile       string
+    ContextFile      string
+    PolicyRevision   uint64
+    CreatedAt        time.Time
+    UpdatedAt        time.Time
+}
+```
+
+Management semantics:
+
+- **Create:** validate the identity and files, generate the backend UUID, write
+  the registry atomically, then allow contact routing. The UUID is not returned
+  to the contact agent.
+- **Update safe context:** increment the revision and respawn the affected front
+  agent so stale context is not retained in a warm process. Starting a fresh
+  front transcript is the safe default.
+- **Update backend policy:** do not append a contradictory policy to an existing
+  backend transcript. Provision a new backend UUID/session with the new policy,
+  atomically switch the registry, then drain and archive the old session.
+- **Disable:** reject new contact turns and bridge requests immediately while
+  retaining policy, context, and transcripts for later re-enablement.
+- **Destroy:** disable first, revoke process-scoped bridge tokens, abort or drain
+  active turns, remove the registry entry, and archive or delete session data
+  according to an explicit flag. Destruction must be idempotent.
+- **List/show:** expose status, external identity, policy revision, timestamps,
+  and pending approvals, but never credentials or internal bridge tokens.
+
+Changes must be atomic from the router's perspective: each request uses either
+the old complete record or the new complete record, never a partially updated
+policy/channel combination. Write an audit event for every management action,
+including the operator channel that requested it.
+
+For v1, policy and context content should remain file-backed and versionable.
+The CLI manages references and lifecycle rather than accepting large prompt text
+as shell arguments. A later `--policy-stdin` option may support agent-authored
+policies without quoting problems.
+
 ## Agent topology
 
 Use separate pools rather than making one pool dynamically switch privilege
@@ -499,11 +576,19 @@ Add a small persisted JSON or SQLite store for pending approvals. SQLite is
 already available in the image, but using it from Go would require a driver;
 therefore use atomic JSON files in v1 unless a database dependency is accepted.
 
+### 8. Operator management CLI and registry
+
+Add `wall-e contact` commands and a loopback-only control transport. Persist
+contact records atomically, bind every mutation to an authenticated operator
+channel, and implement create/update/disable/enable/destroy lifecycle hooks for
+front and backend sessions.
+
 ## Implementation phases
 
-### Phase 1 — isolated contact conversations
+### Phase 1 — registry, control plane, and isolated contact conversations
 
-- Parse operator/contact/group access configuration.
+- Parse operator/contact/group access configuration into the contact registry.
+- Add `wall-e contact` create/list/show/update/disable/enable/destroy commands.
 - Add contact RPC flags and restricted contact pool.
 - Add `CONTACT_SYSTEM.md` and per-contact safe context.
 - Route operator and contact messages to separate pools.
@@ -596,6 +681,12 @@ path toward the backend.
 - Sensitive actions can require explicit, one-time operator approval.
 - Contact-visible failures contain no policy text, tool output, paths, tokens,
   or internal errors.
+- Operators can create, inspect, update, disable, enable, and destroy contact
+  channels from an operator conversation through the local management CLI.
+- Policy changes rotate the backend channel/session rather than trying to
+  rewrite the system policy of a live session.
+- Disabled or destroyed contacts cannot start turns or call an existing bridge
+  token.
 
 ## Explicit non-goals
 
