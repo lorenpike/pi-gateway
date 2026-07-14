@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import secrets
 import time
+from collections.abc import Iterable
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 import requests
@@ -40,23 +44,35 @@ class Agent:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        _ = exc_type, exc, tb  # unused
+
         if self.auto_clean:
             self.clean()
         else:
             self.stop()
 
-    def __call__(self, message: str | None) -> str:
+    def __call__(
+        self,
+        message: str | None,
+        attachments: Iterable[Path | Traversable] = (),
+    ) -> str:
         if message is None:
             raise ValueError("Agent requires a prompt")
         if self.container.process is None or self.container.process.poll() is not None:
             raise RuntimeError("Agent is not running; use `with Agent() as agent:`")
 
         self.messages.append(("user", message))
+        payload = {
+            "channelType": "http",
+            "channel": self.channel,
+            "message": message,
+            "attachments": [_encode_attachment(path) for path in attachments],
+        }
 
         response = requests.post(
             f"{self.container.url}/v1/prompt",
             headers={"Authorization": f"Bearer {self.container.token}"},
-            json={"channelType": "http", "channel": self.channel, "message": message},
+            json=payload,
             stream=True,
             timeout=300,
         )
@@ -101,6 +117,15 @@ class Agent:
             self.stop()
         except Exception:
             pass
+
+
+def _encode_attachment(path: Path | Traversable) -> dict[str, str]:
+    mime_type, _ = mimetypes.guess_type(path.name)
+    return {
+        "fileName": path.name,
+        "mimeType": mime_type or "application/octet-stream",
+        "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+    }
 
 
 def read_sse_response(response: requests.Response) -> str:

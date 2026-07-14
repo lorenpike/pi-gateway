@@ -2,7 +2,7 @@ from textwrap import dedent
 
 import jmespath
 
-from walle_bench import Agent, static, timeout
+from walle_bench import Agent, seed, timeout
 
 TIMEOUT = 120  # seconds
 
@@ -15,14 +15,10 @@ def test_remembers_favorite_colour():
         """)
 
     with timeout(TIMEOUT), Agent(clean=True) as agent:
-        (agent.workspace / "CONTEXT.md").write_text(
-            (static / "contexts" / "carl.md").read_text()
-        )
-
-        project = agent.workspace / "projects" / "harry"
-        project.mkdir(parents=True, exist_ok=True)
-        (project / "tax-bracket.html").write_text(
-            (static / "projects" / "tax-brackets.html").read_text()
+        seed("contexts/carl.md", agent.workspace / "CONTEXT.md")
+        seed(
+            "projects/tax-brackets.html",
+            agent.workspace / "projects" / "harry" / "tax-bracket.html",
         )
 
         _ = agent(prompt)  # We care about the tools called, not the response
@@ -36,7 +32,7 @@ def test_remembers_favorite_colour():
         agent.new_session()  # Start fresh
         response = agent("What is my favorite colour?")
 
-        assert "#FFBD2E" in response, f"{response=}"
+        assert "#FFBD2E" in response.lower(), f"{response=}"
 
 
 if __name__ == "__main__":

@@ -30,15 +30,24 @@ Outcome = tuple[str, Exception | None]
     help="Number of times to run each benchmark.",
 )
 @click.option(
+    "-k",
+    "--keyword",
+    metavar="TEXT",
+    help="Run tests whose function name contains this text.",
+)
+@click.option(
     "-v",
     "--verbose",
     is_flag=True,
     help="Print a traceback for every failure and error.",
 )
-def main(jobs: int, attempts: int, verbose: bool) -> None:
+def main(jobs: int, attempts: int, keyword: str | None, verbose: bool) -> None:
     """Discover and run wall-e benchmarks."""
 
     tests = discover()
+    if keyword is not None:
+        tests = [test for test in tests if keyword in test.__name__]
+
     failed = False
     results: list[tuple[str, list[Outcome]]] = []
 
