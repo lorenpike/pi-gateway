@@ -1,5 +1,12 @@
 # TODO
 
+- [ ] Add composio to `wall-e` build and system prompt
+
+- [ ] Added security hardening to `wall-e` system prompt
+
+- [ ] Telegram message clipping bug: `wall-e streaming will drop parts of the
+  message`
+
 - [x] Fix slow and misleading `wall-e send --media` failures.
   - The image path already used `sendPhoto`, but any photo error—including an ambiguous transport timeout—was silently discarded before retrying with `sendDocument`. Two sequential timeouts could therefore take 30–180 seconds and report only the misleading document error.
   - Telegram polling also mutated the timeout on the shared `http.Client` while sends used it concurrently, and the persistent HTTP/2 connection had no health check. During the reported incident, gateway logs showed `getUpdates` and `sendChatAction` timing out too, confirming this was not specific to PNG dimensions.
@@ -18,9 +25,9 @@
 
 ## Appendix A: Markdown formatting regressions
 
-Add improperly formatted message examples below in `<?--example-->` blocks so they can be turned into parser tests.
+Add improperly formatted message examples below in `<!--example-->` blocks so they can be turned into parser tests.
 
-<?--example-->
+<!--example-->
 With the current setup, email could be handled as another **front-end/channel adapter**, similar to Telegram or HTTP.
 
 Current architecture already has the useful core pieces:
@@ -101,4 +108,4 @@ Main missing pieces:
 - Safety controls: allowed senders, max body size, maybe approval before sending external replies.
 
 So: email is very compatible with the current channel architecture. The fastest version is a script using `wall-e msg`; the clean version is a first-class `email` adapter.
-<?--example-->
+<!--example-->

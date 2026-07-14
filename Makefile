@@ -79,7 +79,7 @@ test:
 
 .PHONY: bench # Run the benchmark harness
 bench:
-	@cd benchmark && uv run walle-bench
+	@cd benchmark && uv run walle-bench -j 6 -n 5 -v
 
 .PHONY: clean # Clean build artifacts
 clean:

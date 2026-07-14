@@ -1,6 +1,8 @@
 ---
 name: at
-description: Schedule, inspect, and cancel jobs that should run once.
+description: |
+  Schedule, inspect, and cancel jobs that should run once. Like
+  reminders, messages, or delayed tasks
 ---
 
 # One-off jobs with at

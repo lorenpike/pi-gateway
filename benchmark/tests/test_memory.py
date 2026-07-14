@@ -32,7 +32,7 @@ def test_remembers_favorite_colour():
         agent.new_session()  # Start fresh
         response = agent("What is my favorite colour?")
 
-        assert "#FFBD2E" in response.lower(), f"{response=}"
+        assert "#FFBD2E" in response.upper(), f"{response=}"
 
 
 if __name__ == "__main__":
