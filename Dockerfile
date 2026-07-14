@@ -106,10 +106,10 @@ RUN cd /opt/pi/skills/brave-search && sudo npm install
 
 COPY --from=build /usr/local/bin/wall-e /usr/local/bin/wall-e
 
-COPY --chown=wall-e:wall-e --chmod=555 static/.vimrc static/.tmux.conf ./
-COPY --chown=wall-e:wall-e --chmod=555 static/APPEND_SYSTEM.md /opt/pi
-COPY --chown=wall-e:wall-e --chmod=555 static/CONTEXT.md /home/wall-e/CONTEXT.md
-COPY --chown=wall-e:wall-e --chmod=555 static/SYSTEM.md /opt/wall-e/SYSTEM.md
+COPY --chown=wall-e:wall-e --chmod=644 static/.vimrc static/.tmux.conf ./
+COPY --chown=wall-e:wall-e --chmod=644 static/APPEND_SYSTEM.md /opt/pi/APPEND_SYSTEM.md
+COPY --chown=wall-e:wall-e --chmod=644 static/CONTEXT.md /home/wall-e/CONTEXT.md
+COPY --chown=wall-e:wall-e --chmod=644 static/SYSTEM.md /opt/wall-e/SYSTEM.md
 COPY --chown=wall-e:wall-e --chmod=555 static/site/ /opt/wall-e/www/
 COPY --chown=root:root --chmod=755 docs/build/html /usr/share/wall-e/docs
 
