@@ -23,6 +23,7 @@ this is still here, please delete this section.
 # Company
 
 - name: {{ Company name }}
+- location: {{ Company location }}
 - description: {{ Company description }}
 
 # Notes

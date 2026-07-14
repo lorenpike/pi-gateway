@@ -1,6 +1,10 @@
 # TODO
 
-- [ ] Add composio to `wall-e` build and system prompt
+- [ ] Add an email adapter to `wall-e` for inbound and outbound email.
+
+- [ ] Debug transisent benchmarking failures due to timeouts
+
+- [x] Add composio to `wall-e` build and system prompt
 
 - [ ] Added security hardening to `wall-e` system prompt
 
