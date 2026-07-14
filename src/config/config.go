@@ -8,9 +8,6 @@
 //	pool.Config     (worker pool sizing/drain)
 //	httpapi.Config  (HTTP listen address, bearer token, queue timeout)
 //
-// plus a LogLevel string (parsed but routed to stdlib log for v1 — no logging
-// dependency).
-//
 // Import direction: config imports httpapi/pool/session/rpc, never the reverse.
 // This keeps the dependency graph acyclic. httpapi.ConfigFromEnv (Phase 4) is
 // left in place as a thin per-package helper; config.Load builds the httpapi
@@ -23,15 +20,11 @@
 //	WALLE_POOL_SIZE              4
 //	WALLE_DRAIN_TIMEOUT          30s
 //	WALLE_SESSION_DIR            /home/wall-e/sessions
-//	WALLE_PI_BIN                 pi
 //	WALLE_PROVIDER               (unset → pi settings default)
 //	WALLE_MODEL                  (unset → pi settings default)
-//	WALLE_CONFIRM_DEFAULT        true
-//	WALLE_LOG_LEVEL              info
 //	WALLE_HTTP_QUEUE_TIMEOUT     60s
 //	WALLE_SITE                   /opt/wall-e/www
 //	WALLE_SESSION_EXPORT_TIMEOUT 30s
-//	WALLE_TELEGRAM_REGISTER_COMMANDS true
 package config
 
 import (
@@ -61,10 +54,6 @@ type TelegramConfig struct {
 	Token string
 	// AllowedChats is the optional chat-id allowlist (empty = allow all).
 	AllowedChats []int64
-	// RegisterCommands controls whether the Telegram front-end calls
-	// setMyCommands for pi slash-command aliases. Command parsing still works
-	// when false. Defaults to true.
-	RegisterCommands bool
 }
 
 // Default values. Exported so tests and main can reference them.
@@ -73,10 +62,7 @@ const (
 	DefaultPoolSize             = 4
 	DefaultDrainTimeout         = 30 * time.Second
 	DefaultSessionDir           = "/home/wall-e/sessions"
-	DefaultPiBin                = "pi"
 	DefaultSystemPrompt         = "/opt/wall-e/SYSTEM.md"
-	DefaultConfirmDefault       = true
-	DefaultLogLevel             = "info"
 	DefaultHTTPQueueTimeout     = 60 * time.Second
 	DefaultSiteDir              = "/opt/wall-e/www"
 	DefaultSessionExportTimeout = 30 * time.Second
@@ -90,11 +76,6 @@ type Config struct {
 	Pool    pool.Config
 	Session session.Config
 	RPC     rpc.Config
-
-	// LogLevel is parsed from WALLE_LOG_LEVEL (default "info"). v1 routes it
-	// to the stdlib log; the gateway itself doesn't filter on it yet, but the
-	// value is validated so a typo is caught at startup rather than later.
-	LogLevel string
 
 	// SessionDir is echoed at the top level because it is also needed by the
 	// container wiring (mkdir at startup) and by the Dockerfile, and pulling
@@ -191,38 +172,14 @@ func Load() (Config, error) {
 	cfg.Session = session.Config{SessionDir: sessionDir}
 	cfg.SessionDir = sessionDir
 
-	// --- WALLE_PI_BIN / WALLE_PROVIDER / WALLE_MODEL --------------------
-	piBin := os.Getenv("WALLE_PI_BIN")
-	if piBin == "" {
-		piBin = DefaultPiBin
-	}
-	provider := os.Getenv("WALLE_PROVIDER")
-	model := os.Getenv("WALLE_MODEL")
-
-	// --- WALLE_CONFIRM_DEFAULT (default true) ---------------------------
-	confirmDefault, err := parseBoolEnv("WALLE_CONFIRM_DEFAULT", DefaultConfirmDefault)
-	if err != nil {
-		errs = append(errs, err.Error())
-	}
-
+	// --- WALLE_PROVIDER / WALLE_MODEL -----------------------------------
 	cfg.RPC = rpc.Config{
-		PiBin:        piBin,
-		Provider:     provider,
-		Model:        model,
+		Provider:     os.Getenv("WALLE_PROVIDER"),
+		Model:        os.Getenv("WALLE_MODEL"),
 		SystemPrompt: DefaultSystemPrompt,
 		SessionDir:   sessionDir,
-		UIPolicy:     rpc.ExtensionUIPolicy{ConfirmedDefault: confirmDefault},
+		UIPolicy:     rpc.DefaultExtensionUIPolicy(),
 	}
-
-	// --- WALLE_LOG_LEVEL (default info) ---------------------------------
-	logLevel := os.Getenv("WALLE_LOG_LEVEL")
-	if logLevel == "" {
-		logLevel = DefaultLogLevel
-	}
-	if !isValidLogLevel(logLevel) {
-		errs = append(errs, fmt.Sprintf("invalid WALLE_LOG_LEVEL %q: must be one of debug/info/warn/error", logLevel))
-	}
-	cfg.LogLevel = logLevel
 
 	// --- WALLE_TELEGRAM_TOKEN / WALLE_TELEGRAM_ALLOWED_CHATS -------------
 	// Telegram is optional: if the token is unset, the front-end is skipped
@@ -233,11 +190,6 @@ func Load() (Config, error) {
 		errs = append(errs, err.Error())
 	}
 	cfg.Chat.Telegram.AllowedChats = allowedChats
-	telegramRegisterCommands, err := parseBoolEnv("WALLE_TELEGRAM_REGISTER_COMMANDS", true)
-	if err != nil {
-		errs = append(errs, err.Error())
-	}
-	cfg.Chat.Telegram.RegisterCommands = telegramRegisterCommands
 
 	if len(errs) > 0 {
 		return cfg, fmt.Errorf("config: %s", strings.Join(errs, "; "))
@@ -274,31 +226,6 @@ func parseIntEnv(name string, def int) (int, error) {
 		return def, fmt.Errorf("invalid %s %q: %w", name, v, err)
 	}
 	return n, nil
-}
-
-// parseBoolEnv reads a boolean-typed env var, applying def when unset. Accepts
-// the common spellings (1/0, true/false, yes/no, on/off) case-insensitively so
-// a typo doesn't silently flip the default.
-func parseBoolEnv(name string, def bool) (bool, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return def, nil
-	}
-	switch strings.ToLower(v) {
-	case "1", "true", "yes", "on":
-		return true, nil
-	case "0", "false", "no", "off":
-		return false, nil
-	}
-	return def, fmt.Errorf("invalid %s %q: must be true/false", name, v)
-}
-
-func isValidLogLevel(s string) bool {
-	switch strings.ToLower(s) {
-	case "debug", "info", "warn", "error":
-		return true
-	}
-	return false
 }
 
 // parseInt64ListEnv reads a comma-separated list of int64 values (e.g.

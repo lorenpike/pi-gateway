@@ -4,12 +4,16 @@
 
 - [ ] Debug transisent benchmarking failures due to timeouts
 
+- [ ] A default cron job to refactor the CONTEXT.md
+
 - [x] Add composio to `wall-e` build and system prompt
 
 - [ ] Added security hardening to `wall-e` system prompt
 
 - [ ] Telegram message clipping bug: `wall-e streaming will drop parts of the
   message`
+
+- [ ] Clean up `wall-e` env variables
 
 - [x] Fix slow and misleading `wall-e send --media` failures.
   - The image path already used `sendPhoto`, but any photo error—including an ambiguous transport timeout—was silently discarded before retrying with `sendDocument`. Two sequential timeouts could therefore take 30–180 seconds and report only the misleading document error.

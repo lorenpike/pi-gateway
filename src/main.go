@@ -510,8 +510,8 @@ func telegramCommandProvider(base rpc.Config) func(context.Context) ([]rpc.Comma
 // WALLE_DRAIN_TIMEOUT.
 func run(ctx context.Context, cfg config.Config) error {
 	log.SetPrefix("wall-e: ")
-	log.Printf("starting: http=%s pool=%d session_dir=%s log=%s",
-		cfg.HTTP.Addr, cfg.Pool.Size, cfg.SessionDir, cfg.LogLevel)
+	log.Printf("starting: http=%s pool=%d session_dir=%s",
+		cfg.HTTP.Addr, cfg.Pool.Size, cfg.SessionDir)
 
 	// 1. Session manager + startup recovery (best-effort). An empty/corrupt
 	//    dir just means no channels are known yet; they generate fresh paths
@@ -542,12 +542,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	var frontends []chat.Frontend
 	if cfg.Chat.Telegram.Token != "" {
 		tb, err := chat.NewTelegram(chat.Config{
-			Token:                      cfg.Chat.Telegram.Token,
-			AllowedChats:               cfg.Chat.Telegram.AllowedChats,
-			DisableCommandRegistration: !cfg.Chat.Telegram.RegisterCommands,
-			CommandProvider:            telegramCommandProvider(cfg.RPC),
-			Turns:                      turns,
-			MediaStore:                 mediaStore,
+			Token:           cfg.Chat.Telegram.Token,
+			AllowedChats:    cfg.Chat.Telegram.AllowedChats,
+			CommandProvider: telegramCommandProvider(cfg.RPC),
+			Turns:           turns,
+			MediaStore:      mediaStore,
 		}, p, nil)
 		if err != nil {
 			log.Printf("telegram: disabled: %v", err)

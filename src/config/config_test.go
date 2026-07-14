@@ -20,14 +20,10 @@ var allWalleEnv = []string{
 	"WALLE_POOL_SIZE",
 	"WALLE_DRAIN_TIMEOUT",
 	"WALLE_SESSION_DIR",
-	"WALLE_PI_BIN",
 	"WALLE_PROVIDER",
 	"WALLE_MODEL",
-	"WALLE_CONFIRM_DEFAULT",
-	"WALLE_LOG_LEVEL",
 	"WALLE_TELEGRAM_TOKEN",
 	"WALLE_TELEGRAM_ALLOWED_CHATS",
-	"WALLE_TELEGRAM_REGISTER_COMMANDS",
 }
 
 // clearWalleEnv unsets every WALLE_* var Load reads, for a known-clean start.
@@ -75,8 +71,8 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 	if cfg.SessionDir != "/home/wall-e/sessions" {
 		t.Errorf("SessionDir = %q, want default", cfg.SessionDir)
 	}
-	if cfg.RPC.PiBin != "pi" {
-		t.Errorf("RPC.PiBin = %q, want pi", cfg.RPC.PiBin)
+	if cfg.RPC.PiBin != "" {
+		t.Errorf("RPC.PiBin = %q, want empty so rpc uses pi", cfg.RPC.PiBin)
 	}
 	if cfg.RPC.Provider != "" {
 		t.Errorf("RPC.Provider = %q, want empty", cfg.RPC.Provider)
@@ -92,9 +88,6 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 	}
 	if !cfg.RPC.UIPolicy.ConfirmedDefault {
 		t.Errorf("RPC.UIPolicy.ConfirmedDefault = false, want true")
-	}
-	if cfg.LogLevel != "info" {
-		t.Errorf("LogLevel = %q, want info", cfg.LogLevel)
 	}
 }
 
@@ -131,11 +124,8 @@ func TestLoad_ExplicitOverrides(t *testing.T) {
 	t.Setenv("WALLE_POOL_SIZE", "8")
 	t.Setenv("WALLE_DRAIN_TIMEOUT", "5m")
 	t.Setenv("WALLE_SESSION_DIR", "/tmp/sess")
-	t.Setenv("WALLE_PI_BIN", "/usr/local/bin/pi")
 	t.Setenv("WALLE_PROVIDER", "openai")
 	t.Setenv("WALLE_MODEL", "openai/gpt-5")
-	t.Setenv("WALLE_CONFIRM_DEFAULT", "false")
-	t.Setenv("WALLE_LOG_LEVEL", "debug")
 
 	cfg, err := Load()
 	if err != nil {
@@ -162,9 +152,6 @@ func TestLoad_ExplicitOverrides(t *testing.T) {
 	if cfg.Session.SessionDir != "/tmp/sess" {
 		t.Errorf("Session.SessionDir = %q, want /tmp/sess", cfg.Session.SessionDir)
 	}
-	if cfg.RPC.PiBin != "/usr/local/bin/pi" {
-		t.Errorf("RPC.PiBin = %q", cfg.RPC.PiBin)
-	}
 	if cfg.RPC.Provider != "openai" {
 		t.Errorf("RPC.Provider = %q", cfg.RPC.Provider)
 	}
@@ -174,11 +161,8 @@ func TestLoad_ExplicitOverrides(t *testing.T) {
 	if cfg.RPC.SystemPrompt != "/opt/wall-e/SYSTEM.md" {
 		t.Errorf("RPC.SystemPrompt = %q", cfg.RPC.SystemPrompt)
 	}
-	if cfg.RPC.UIPolicy.ConfirmedDefault {
-		t.Errorf("UIPolicy.ConfirmedDefault = true, want false")
-	}
-	if cfg.LogLevel != "debug" {
-		t.Errorf("LogLevel = %q, want debug", cfg.LogLevel)
+	if !cfg.RPC.UIPolicy.ConfirmedDefault {
+		t.Errorf("UIPolicy.ConfirmedDefault = false, want true")
 	}
 }
 
@@ -267,52 +251,6 @@ func TestLoad_InvalidPoolSize(t *testing.T) {
 	})
 }
 
-func TestLoad_ConfirmDefaultBoolParsing(t *testing.T) {
-	cases := []struct {
-		in, name string
-		want     bool
-	}{
-		{"false", "false", false},
-		{"FALSE", "FALSE", false},
-		{"0", "0", false},
-		{"no", "no", false},
-		{"off", "off", false},
-		{"true", "true", true},
-		{"YES", "YES", true},
-		{"1", "1", true},
-		{"on", "on", true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			clearWalleEnv(t)
-			t.Setenv("WALLE_TOKEN", "x")
-			t.Setenv("WALLE_CONFIRM_DEFAULT", c.in)
-
-			cfg, err := Load()
-			if err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			if cfg.RPC.UIPolicy.ConfirmedDefault != c.want {
-				t.Errorf("CONFIRM_DEFAULT=%q → %v, want %v", c.in, cfg.RPC.UIPolicy.ConfirmedDefault, c.want)
-			}
-		})
-	}
-
-	t.Run("invalid bool", func(t *testing.T) {
-		clearWalleEnv(t)
-		t.Setenv("WALLE_TOKEN", "x")
-		t.Setenv("WALLE_CONFIRM_DEFAULT", "maybe")
-
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !contains(err.Error(), "WALLE_CONFIRM_DEFAULT") {
-			t.Errorf("error %q does not mention WALLE_CONFIRM_DEFAULT", err.Error())
-		}
-	})
-}
-
 func TestLoad_InvalidPort(t *testing.T) {
 	clearWalleEnv(t)
 	t.Setenv("WALLE_TOKEN", "x")
@@ -327,26 +265,11 @@ func TestLoad_InvalidPort(t *testing.T) {
 	}
 }
 
-func TestLoad_InvalidLogLevel(t *testing.T) {
-	clearWalleEnv(t)
-	t.Setenv("WALLE_TOKEN", "x")
-	t.Setenv("WALLE_LOG_LEVEL", "trace")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !contains(err.Error(), "WALLE_LOG_LEVEL") {
-		t.Errorf("error %q does not mention WALLE_LOG_LEVEL", err.Error())
-	}
-}
-
 func TestLoad_MultipleErrorsAllReported(t *testing.T) {
 	clearWalleEnv(t)
 	// No token, plus several bad values.
 	t.Setenv("WALLE_DRAIN_TIMEOUT", "nope")
 	t.Setenv("WALLE_POOL_SIZE", "0")
-	t.Setenv("WALLE_LOG_LEVEL", "trace")
 
 	_, err := Load()
 	if err == nil {
@@ -354,7 +277,7 @@ func TestLoad_MultipleErrorsAllReported(t *testing.T) {
 	}
 	msg := err.Error()
 	// Every bad var should be mentioned, so a user fixes them all at once.
-	for _, want := range []string{"WALLE_TOKEN", "WALLE_DRAIN_TIMEOUT", "WALLE_POOL_SIZE", "WALLE_LOG_LEVEL"} {
+	for _, want := range []string{"WALLE_TOKEN", "WALLE_DRAIN_TIMEOUT", "WALLE_POOL_SIZE"} {
 		if !contains(msg, want) {
 			t.Errorf("error %q does not mention %s", msg, want)
 		}
@@ -376,9 +299,6 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 		if cfg.Chat.Telegram.AllowedChats != nil {
 			t.Errorf("Telegram.AllowedChats = %v, want nil", cfg.Chat.Telegram.AllowedChats)
 		}
-		if !cfg.Chat.Telegram.RegisterCommands {
-			t.Errorf("Telegram.RegisterCommands = false, want true")
-		}
 	})
 
 	t.Run("token + allowlist parsed", func(t *testing.T) {
@@ -386,7 +306,6 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 		t.Setenv("WALLE_TOKEN", "x")
 		t.Setenv("WALLE_TELEGRAM_TOKEN", "123:ABC")
 		t.Setenv("WALLE_TELEGRAM_ALLOWED_CHATS", " 42, -7 , 999")
-		t.Setenv("WALLE_TELEGRAM_REGISTER_COMMANDS", "false")
 
 		cfg, err := Load()
 		if err != nil {
@@ -403,9 +322,6 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 			if cfg.Chat.Telegram.AllowedChats[i] != want[i] {
 				t.Errorf("AllowedChats[%d] = %d, want %d", i, cfg.Chat.Telegram.AllowedChats[i], want[i])
 			}
-		}
-		if cfg.Chat.Telegram.RegisterCommands {
-			t.Errorf("RegisterCommands = true, want false")
 		}
 	})
 
@@ -434,20 +350,6 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 		}
 		if !contains(err.Error(), "WALLE_TELEGRAM_ALLOWED_CHATS") {
 			t.Errorf("error %q does not mention WALLE_TELEGRAM_ALLOWED_CHATS", err.Error())
-		}
-	})
-
-	t.Run("bad register commands bool rejected", func(t *testing.T) {
-		clearWalleEnv(t)
-		t.Setenv("WALLE_TOKEN", "x")
-		t.Setenv("WALLE_TELEGRAM_REGISTER_COMMANDS", "maybe")
-
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error for bad register commands bool, got nil")
-		}
-		if !contains(err.Error(), "WALLE_TELEGRAM_REGISTER_COMMANDS") {
-			t.Errorf("error %q does not mention WALLE_TELEGRAM_REGISTER_COMMANDS", err.Error())
 		}
 	})
 }

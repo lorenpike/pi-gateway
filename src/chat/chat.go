@@ -186,8 +186,8 @@ type Config struct {
 	AllowedChats []int64
 	// DisableCommandRegistration controls whether Start skips Telegram
 	// setMyCommands. Command parsing still uses CommandProvider when disabled.
-	// Config.Load owns env parsing and main sets this from
-	// WALLE_TELEGRAM_REGISTER_COMMANDS.
+	// The gateway leaves this false; the option is retained for direct users
+	// and focused tests of the Telegram adapter.
 	DisableCommandRegistration bool
 	// CommandProvider discovers pi RPC commands (extensions, prompt templates,
 	// and skills) for Telegram aliases. It may be nil.

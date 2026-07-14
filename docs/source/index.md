@@ -4,6 +4,13 @@
 
 ```{toctree}
 :maxdepth: 2
+:caption: Configuration
+
+environment
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: Channels
 
 channels/index
@@ -34,7 +41,7 @@ make docker            # build + run the gateway container (tini PID 1 -> superv
 make stop              # docker stop (graceful drain within WALLE_DRAIN_TIMEOUT)
 ```
 
-See the config table in `README.md` for the full `WALLE_*` env var list. The front-end-specific setup lives under [Channels](channels/index).
+See [Environment variables](environment) for gateway, CLI, credential, container, and benchmark configuration. Front-end-specific setup lives under [Channels](channels/index).
 
 ## Source layout
 
@@ -54,4 +61,4 @@ src/
 
 - `archive/20260627--walle-gateway.md` — the full implementation plan.
 - `archive/20260627--log.md` — per-phase implementation log (decisions, gotchas, iteration notes).
-- `README.md` — quickstart smoke + config table.
+- `README.md` — quickstart and development commands.
