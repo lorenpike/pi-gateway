@@ -60,6 +60,9 @@ RUN mkdir -p --mode=0755 /usr/share/keyrings \
 
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
+RUN curl -fsSL https://composio.dev/install | COMPOSIO_INSTALL_DIR=/opt/composio bash \
+    && ln -s /opt/composio/composio /usr/local/bin/composio
+
 RUN ln -s "$(which fdfind)" /usr/local/bin/fd && \
     ln -s "$(which nvim)" /usr/local/bin/vi
 
