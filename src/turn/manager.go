@@ -8,7 +8,9 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 
 	"wall-e/pool"
@@ -36,7 +38,7 @@ type Turn struct {
 	mu         sync.Mutex
 	slot       *pool.Slot
 	acquireErr error
-	subs       map[chan rpc.Event]struct{}
+	subs       map[chan rpc.Event]chan string
 }
 
 // Subscription is a per-caller event stream for an active turn. Call Close when
@@ -44,7 +46,11 @@ type Turn struct {
 // underlying turn; other subscribers/delivery adapters may still be using it.
 type Subscription struct {
 	Events <-chan rpc.Event
-	close  func()
+	// FinalText receives the authoritative concatenation of all assistant text
+	// deltas when the turn completes normally. It closes without a value if the
+	// turn fails. Unlike Events, its completion value is never dropped.
+	FinalText <-chan string
+	close     func()
 }
 
 // Close detaches this subscriber from the turn. It is safe to call multiple
@@ -101,7 +107,7 @@ func (m *Manager) Submit(ctx context.Context, channel pool.ChannelID, message st
 		m.mu.Lock()
 		t := m.turns[channel]
 		if t == nil {
-			t = &Turn{mgr: m, channel: channel, ready: make(chan struct{}), done: make(chan struct{}), subs: make(map[chan rpc.Event]struct{})}
+			t = &Turn{mgr: m, channel: channel, ready: make(chan struct{}), done: make(chan struct{}), subs: make(map[chan rpc.Event]chan string)}
 			m.turns[channel] = t
 			sub := t.subscribeLocked()
 			extras := make([]*Subscription, 0, opts.ExtraNewSubscribers)
@@ -230,6 +236,8 @@ func (m *Manager) Abort(ctx context.Context, channel pool.ChannelID) (rpc.Respon
 var ErrNoActiveTurn = errors.New("turn: no active turn")
 
 func (t *Turn) run(acquireCtx context.Context, message string) {
+	var finalText strings.Builder
+	completed := false
 	defer close(t.done)
 	defer func() {
 		t.mgr.mu.Lock()
@@ -237,7 +245,7 @@ func (t *Turn) run(acquireCtx context.Context, message string) {
 			delete(t.mgr.turns, t.channel)
 		}
 		t.mgr.mu.Unlock()
-		t.closeSubscribers()
+		t.closeSubscribers(finalText.String(), completed)
 	}()
 
 	slot, err := t.mgr.pool.Acquire(acquireCtx, t.channel)
@@ -255,8 +263,14 @@ func (t *Turn) run(acquireCtx context.Context, message string) {
 		return
 	}
 	for ev := range slot.Events() {
+		if ev.Type == rpc.EventMessageUpdate {
+			if delta, ok := turnTextDelta(ev.Raw); ok {
+				finalText.WriteString(delta)
+			}
+		}
 		t.broadcast(ev)
 		if ev.Type == rpc.EventAgentEnd {
+			completed = true
 			return
 		}
 	}
@@ -266,23 +280,26 @@ func (t *Turn) run(acquireCtx context.Context, message string) {
 // against manager map removal; Turn.mu protects the subscriber set itself.
 func (t *Turn) subscribeLocked() *Subscription {
 	ch := make(chan rpc.Event, 64)
+	final := make(chan string, 1)
 	t.mu.Lock()
 	select {
 	case <-t.done:
 		close(ch)
+		close(final)
 		t.mu.Unlock()
-		return &Subscription{Events: ch, close: func() {}}
+		return &Subscription{Events: ch, FinalText: final, close: func() {}}
 	default:
 	}
-	t.subs[ch] = struct{}{}
+	t.subs[ch] = final
 	t.mu.Unlock()
 	var once sync.Once
-	return &Subscription{Events: ch, close: func() {
+	return &Subscription{Events: ch, FinalText: final, close: func() {
 		once.Do(func() {
 			t.mu.Lock()
-			if _, ok := t.subs[ch]; ok {
+			if finalCh, ok := t.subs[ch]; ok {
 				delete(t.subs, ch)
 				close(ch)
+				close(finalCh)
 			}
 			t.mu.Unlock()
 		})
@@ -301,11 +318,28 @@ func (t *Turn) broadcast(ev rpc.Event) {
 	}
 }
 
-func (t *Turn) closeSubscribers() {
+func (t *Turn) closeSubscribers(finalText string, completed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for ch := range t.subs {
+	for ch, final := range t.subs {
+		if completed {
+			final <- finalText
+		}
+		close(final)
 		close(ch)
 		delete(t.subs, ch)
 	}
+}
+
+func turnTextDelta(raw []byte) (string, bool) {
+	var ev struct {
+		AssistantMessageEvent struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		} `json:"assistantMessageEvent"`
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil || ev.AssistantMessageEvent.Type != "text_delta" {
+		return "", false
+	}
+	return ev.AssistantMessageEvent.Delta, true
 }

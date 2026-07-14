@@ -1,6 +1,6 @@
 # Telegram channel
 
-The Telegram front-end (`chat/telegram.go`, hand-rolled over `net/http` — no `go-telegram-bot-api`/`telebot` dependency) reads messages via long-poll `getUpdates`, routes each chat to the worker pool, and streams replies by **editing a single message in place** (throttled to ~1 edit/sec).
+The Telegram front-end (`chat/telegram.go`, hand-rolled over `net/http` — no `go-telegram-bot-api`/`telebot` dependency) reads messages via long-poll `getUpdates`, routes each chat to the worker pool, shows Telegram's typing indicator while the assistant works, and sends the complete reply when the turn ends.
 
 ## Setup
 
@@ -61,10 +61,9 @@ For the bot to receive group messages:
 For each incoming text message:
 
 1. **Acquire** a slot for the chat (one live `pi` per Telegram chat).
-2. On the **first** assistant text delta, send an initial message (so the user sees the reply start immediately).
-3. As further deltas arrive, **edit that same message** in place, throttled to ~1 edit/sec (Telegram's rate limit is ~30 edits/min). Edits are coalesced: if deltas arrive faster than the throttle, only one edit per tick fires with the accumulated text so far.
-4. Assistant Markdown is rendered through Telegram's `HTML` parse mode using a conservative stdlib converter (bold/italic/code blocks/links/headings/lists; unsupported Markdown remains escaped plain text).
-5. On `agent_end`, **finalize**: a last edit with the full concatenated text. If the final text exceeds Telegram's 4096-char limit, the first chunk pins the existing message and the rest are sent as replies (split on rune boundaries so multi-byte text stays valid UTF-8).
+2. Show and periodically refresh Telegram's **typing** indicator while assistant text deltas are accumulated internally. No partial messages are sent.
+3. Assistant Markdown is rendered through Telegram's `HTML` parse mode using a conservative stdlib converter (bold/italic/code blocks/links/headings/lists; unsupported Markdown remains escaped plain text).
+4. On `agent_end`, send the **full concatenated response**. If it exceeds Telegram's 4096-char limit, split it on rune boundaries and send later chunks as replies to the first chunk so multi-byte text stays valid UTF-8.
 
 Non-text messages are ignored in v1.
 
@@ -80,7 +79,7 @@ The HTTP prompt endpoint can target Telegram directly when the Telegram front-en
 {"channelType":"telegram","channel":"123456789","message":"Scheduled task: ..."}
 ```
 
-The injected user prompt is recorded in the pi transcript but is not echoed into Telegram as a user message. The assistant response is delivered to Telegram using the same edit-in-place behavior as a human-originated Telegram turn, and the HTTP caller also receives the response as SSE.
+The injected user prompt is recorded in the pi transcript but is not echoed into Telegram as a user message. The assistant response is delivered to Telegram using the same typing-then-complete-message behavior as a human-originated Telegram turn, and the HTTP caller also receives the response as SSE.
 
 `WALLE_TELEGRAM_ALLOWED_CHATS` is enforced for HTTP/CLI prompts too; targeting a disallowed chat fails instead of acquiring a pool slot.
 
@@ -106,5 +105,4 @@ The bot ignores its own messages (`from.id == bot.id`, where the bot id is learn
 
 - No persistence of the `getUpdates` offset across restarts — the Bot API confirms the offset once you call `getUpdates` again, so only messages that arrived after the last confirmed offset are redelivered.
 - No inline keyboards / buttons (extension-UI dialogs are auto-answered by policy, not surfaced as keyboards — v2).
-- The ~1 edit/sec throttle may need backoff under heavy load (tracked as a plan risk).
 - Emoji/non-BMP chunking may occasionally allow one fewer chunk than the 4096-char limit permits (rune-safe splitting vs UTF-16 code units); acceptable for v1.

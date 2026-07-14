@@ -4,7 +4,7 @@ package chat
 // Bot API (https://api.telegram.org/bot<token>/<method>) using only net/http.
 // This keeps the gateway stdlib-only (no go-telegram-bot-api / telebot dep):
 // the small set of methods wall-e needs (getMe, getUpdates, sendMessage,
-// editMessageText, sendChatAction, setMyCommands) are trivial JSON POSTs.
+// sendChatAction, setMyCommands, and media operations) are straightforward.
 //
 // Tradeoff note (Phase 6 decision): hand-rolling preserves the module's
 // zero-third-party-dep invariant and the plan's "stdlib-only" framing, at the
@@ -189,22 +189,6 @@ func (h *httpAPI) SendMessage(ctx context.Context, chatID int64, text string, re
 		return Message{}, err
 	}
 	return msg, nil
-}
-
-func (h *httpAPI) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error {
-	payload := map[string]any{
-		"chat_id":    chatID,
-		"message_id": messageID,
-		"text":       renderTelegramMarkdown(text),
-		"parse_mode": telegramParseModeHTML,
-	}
-	// editMessageText returns the edited Message in result; we ignore it. A
-	// "message is not modified" error is surfaced to the caller (logged by the
-	// bot, non-fatal).
-	if err := h.call(ctx, "editMessageText", payload, nil); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (h *httpAPI) SendChatAction(ctx context.Context, chatID int64, action string) error {

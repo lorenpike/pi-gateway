@@ -10,6 +10,11 @@ description: |
 Use `at` for a command that should run once in the future. Use cron for recurring
 jobs and supervisor for long-running services, servers, daemons, or watchers.
 
+> **Short delays:** If the job should run in under 5 minutes, do not use `at`.
+> Start a detached `nohup` job instead, for example:
+> `nohup sh -c 'sleep 120; /absolute/path/to/job.sh' >/absolute/path/to/job.log 2>&1 &`.
+> Use `at` for delays of 5 minutes or longer.
+
 The `atd` daemon runs as an admin-managed supervisor service. Submit jobs as the
 `wall-e` user so they also run as `wall-e`; do not use `sudo at` unless the user
 explicitly requests a root job.

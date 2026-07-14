@@ -4,7 +4,7 @@ package chat
 // plan) using a fake TelegramAPI and a real pool backed by chat's fake pi. No
 // network is hit. Tests cover the plan's test list:
 //   - OnMessage_AcquiresAndReplies
-//   - Streaming_EditsSingleMessage (throttled edit-in-place, final text matches)
+//   - Streaming_WaitsThenSendsFullMessage (typing indicator, no partial sends)
 //   - TypingActionWhileAgentResponds (Telegram "typing…" chat action)
 //   - MidStreamUserMessage_Steers (NOT a second Acquire)
 //   - Over4096Chars_Splits
@@ -41,12 +41,6 @@ type sentMsg struct {
 	replyTo int64
 	msgID   int64
 }
-type editMsg struct {
-	chatID    int64
-	messageID int64
-	text      string
-}
-
 type chatAction struct {
 	chatID int64
 	action string
@@ -56,7 +50,6 @@ type fakeTelegramAPI struct {
 	mu             sync.Mutex
 	me             User
 	sends          []sentMsg
-	edits          []editMsg
 	actions        []chatAction
 	commands       []BotCommand
 	setCommandsErr error
@@ -105,13 +98,6 @@ func (a *fakeTelegramAPI) SendMessage(ctx context.Context, chatID int64, text st
 	id := int64(len(a.sends) + 1)
 	a.sends = append(a.sends, sentMsg{chatID: chatID, text: text, replyTo: replyTo, msgID: id})
 	return Message{MessageID: id, Chat: Chat{ID: chatID}}, nil
-}
-
-func (a *fakeTelegramAPI) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.edits = append(a.edits, editMsg{chatID: chatID, messageID: messageID, text: text})
-	return nil
 }
 
 func (a *fakeTelegramAPI) SendChatAction(ctx context.Context, chatID int64, action string) error {
@@ -173,11 +159,6 @@ func (a *fakeTelegramAPI) sendCount() int {
 	defer a.mu.Unlock()
 	return len(a.sends)
 }
-func (a *fakeTelegramAPI) editCount() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.edits)
-}
 func (a *fakeTelegramAPI) actionCount(chatID int64, action string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -198,14 +179,6 @@ func (a *fakeTelegramAPI) waitForAction(chatID int64, action string, timeout tim
 		time.Sleep(2 * time.Millisecond)
 	}
 	return a.actionCount(chatID, action) > 0
-}
-func (a *fakeTelegramAPI) lastEditText() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if len(a.edits) == 0 {
-		return ""
-	}
-	return a.edits[len(a.edits)-1].text
 }
 func (a *fakeTelegramAPI) lastSendText() string {
 	a.mu.Lock()
@@ -282,7 +255,6 @@ func testPoolWithManager(t *testing.T, handler func(f *fakePI, cmd map[string]an
 }
 
 // newTestBot builds a Bot wired for direct handleMessage calls (no Start/poll).
-// editInterval is short so throttled edits are observable within a test;
 // idleTimeout is disabled (0).
 func newTestBot(t *testing.T, p *pool.Pool, api *fakeTelegramAPI, allowed ...int64) *Bot {
 	t.Helper()
@@ -290,7 +262,6 @@ func newTestBot(t *testing.T, p *pool.Pool, api *fakeTelegramAPI, allowed ...int
 	if err != nil {
 		t.Fatalf("NewTelegram: %v", err)
 	}
-	bot.editInterval = 20 * time.Millisecond
 	bot.idleTimeout = 0
 	bot.ctx, bot.cancel = context.WithCancel(context.Background())
 	bot.botID = api.me.ID
@@ -332,14 +303,11 @@ func TestTelegram_OnMessage_AcquiresAndReplies(t *testing.T) {
 	if !fake.contains(`"type":"prompt"`) {
 		t.Error("expected prompt command")
 	}
-	// The final message text == concatenated deltas "Hello world".
-	finalText := api.lastEditText()
-	if finalText == "" {
-		// Possibly no throttled edit fired; the final send/edit must still be
-		// the concatenated text.
-		finalText = api.lastSendText()
+	// The only message is the complete concatenation of all deltas.
+	if got := api.sendCount(); got != 1 {
+		t.Errorf("sendMessage calls = %d, want 1", got)
 	}
-	if finalText != "Hello world" {
+	if finalText := api.lastSendText(); finalText != "Hello world" {
 		t.Errorf("final message text = %q, want %q", finalText, "Hello world")
 	}
 }
@@ -370,38 +338,76 @@ func TestTelegram_TypingActionWhileAgentResponds(t *testing.T) {
 	}
 }
 
-// TestTelegram_Streaming_EditsSingleMessage: for a long turn the bot creates
-// ONE message (sendMessage once) and edits it as deltas arrive (throttled to
-// ~1 edit/editInterval); the final edit text == full concatenated text.
-func TestTelegram_Streaming_EditsSingleMessage(t *testing.T) {
+// TestTelegram_Streaming_WaitsThenSendsFullMessage verifies that deltas remain
+// invisible while the typing indicator is active, followed by one complete
+// message when the turn ends.
+func TestTelegram_Streaming_WaitsThenSendsFullMessage(t *testing.T) {
 	api := newFakeTelegramAPI(99)
 	script := []scriptedEvent{
-		{kind: "delta", text: "a", delay: 0},
-		{kind: "delta", text: "b", delay: 80 * time.Millisecond},
-		{kind: "delta", text: "c", delay: 80 * time.Millisecond},
-		{kind: "delta", text: "d", delay: 80 * time.Millisecond},
-		{kind: "agent_end", delay: 80 * time.Millisecond},
+		{kind: "delta", text: "a"},
+		{kind: "delta", text: "b", delay: 20 * time.Millisecond},
+		{kind: "delta", text: "c", delay: 20 * time.Millisecond},
+		{kind: "delta", text: "d", delay: 20 * time.Millisecond},
+		{kind: "agent_end", delay: 200 * time.Millisecond},
 	}
-	p, _ := testPool(t, makeScriptedHandler(script, nil))
+	p, ff := testPool(t, makeScriptedHandler(script, nil))
 	bot := newTestBot(t, p, api)
 
-	bot.handleMessage(Message{
-		Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "go",
-	})
+	done := make(chan struct{})
+	go func() {
+		bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "go"})
+		close(done)
+	}()
 
+	fake := ff.waitForFirst(2 * time.Second)
+	if fake == nil || !fake.waitForCommand(`"type":"prompt"`, 2*time.Second) {
+		t.Fatal("prompt not received")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := api.sendCount(); got != 0 {
+		t.Fatalf("sendMessage calls before agent_end = %d, want 0", got)
+	}
+	if got := api.actionCount(42, telegramTypingAction); got == 0 {
+		t.Fatal("typing indicator was not active while accumulating deltas")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn did not finish")
+	}
 	if got := api.sendCount(); got != 1 {
-		t.Errorf("sendMessage calls = %d, want 1 (single message edited in place)", got)
+		t.Errorf("sendMessage calls = %d, want 1", got)
 	}
-	if got := api.editCount(); got < 2 {
-		t.Errorf("editMessageText calls = %d, want >= 2 (throttled edits)", got)
-	}
-	if got := api.lastEditText(); got != "abcd" {
-		t.Errorf("final edit text = %q, want %q", got, "abcd")
+	if got := api.lastSendText(); got != "abcd" {
+		t.Errorf("final sent text = %q, want %q", got, "abcd")
 	}
 }
 
 // TestTelegram_MidStreamUserMessage_Steers: while a turn is streaming for
 // chat X, a second message from chat X issues Steer (NOT a new Acquire).
+func TestTelegram_FinalMessageUsesAuthoritativeTextForBurstyDeltas(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	const deltaCount = 200
+	script := make([]scriptedEvent, 0, deltaCount+1)
+	for range deltaCount {
+		script = append(script, scriptedEvent{kind: "delta", text: "x"})
+	}
+	script = append(script, scriptedEvent{kind: "agent_end"})
+	p, _ := testPool(t, makeScriptedHandler(script, nil))
+	bot := newTestBot(t, p, api)
+
+	bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "burst"})
+
+	want := strings.Repeat("x", deltaCount)
+	if got := api.lastSendText(); got != want {
+		t.Fatalf("final sent text length = %d, want %d", len(got), len(want))
+	}
+	if got := api.sendCount(); got != 1 {
+		t.Errorf("sendMessage calls = %d, want 1", got)
+	}
+}
+
 func TestTelegram_MidStreamUserMessage_Steers(t *testing.T) {
 	api := newFakeTelegramAPI(99)
 	streamDone := make(chan struct{})
@@ -698,7 +704,6 @@ func TestTelegram_PollLoop_DispatchesAndStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTelegram: %v", err)
 	}
-	bot.editInterval = 20 * time.Millisecond
 	bot.idleTimeout = 0
 
 	ctx, cancel := context.WithCancel(context.Background())

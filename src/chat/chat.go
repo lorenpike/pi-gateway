@@ -1,8 +1,8 @@
 // Package chat implements the wall-e chat front-ends (Telegram, and later
 // Discord). Each front-end reads messages from a chat platform, routes every
 // chat to the shared worker pool (one live `pi --mode rpc` process per chat,
-// bound via pool.Acquire/Release), and streams the assistant reply back by
-// editing a single message in place (throttled to the platform's rate limit).
+// bound via pool.Acquire/Release), and delivers the assistant reply using the
+// platform's preferred response behavior.
 //
 // A mid-stream message from a chat that already has an in-flight turn is
 // forwarded as a `steer` (NOT a new Acquire) — the pool's per-channel
@@ -63,8 +63,6 @@ type TelegramAPI interface {
 	// SendMessage posts a text message to a chat, optionally as a reply to
 	// replyTo (0 = no reply). Returns the created message.
 	SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (Message, error)
-	// EditMessageText replaces the text of an existing message.
-	EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error
 	// SendChatAction shows Telegram's transient "bot is typing…" indicator.
 	SendChatAction(ctx context.Context, chatID int64, action string) error
 	// SetMyCommands registers the bot's Telegram slash-command menu. Failures
@@ -209,14 +207,10 @@ type Bot struct {
 	turns   *turn.Manager
 	allowed map[int64]bool
 
-	// editInterval is the throttle for edit-in-place (Telegram's rate limit is
-	// ~30 edits/min ≈ 1 edit/2s; we use 1 edit/sec as a safe default). The
-	// final agent_end edit bypasses the throttle.
-	editInterval time.Duration
 	// idleTimeout bounds how long a turn may go without any event before the
-	// bot gives up and finalizes with whatever text it has. Guards against a
-	// stuck pi process (the pool's Slot.Events() is never closed — see Phase 5
-	// log — so without a watchdog a dead process would hang the turn forever).
+	// bot stops typing and reports that the response did not complete. Guards
+	// against a stuck pi process (the pool's Slot.Events() is never closed — see
+	// Phase 5 log — so without a watchdog a dead process would hang forever).
 	// 0 = disabled (tests).
 	idleTimeout time.Duration
 
@@ -265,7 +259,6 @@ func NewTelegram(cfg Config, p *pool.Pool, api TelegramAPI) (*Bot, error) {
 		pool:               p,
 		turns:              turns,
 		allowed:            allowed,
-		editInterval:       1 * time.Second,
 		idleTimeout:        5 * time.Minute,
 		registerCommands:   !cfg.DisableCommandRegistration,
 		commandProvider:    cfg.CommandProvider,
@@ -894,26 +887,20 @@ func (b *Bot) sendTypingAction(ctx context.Context, chatID int64) {
 	}
 }
 
-// streamSubscription consumes a turn subscription, accumulating text deltas into
-// a buffer and editing a single message in place (throttled to editInterval). On
-// agent_end it finalizes: a final edit (or split into multiple messages if the
-// text exceeds Telegram's 4096-char limit).
+// streamSubscription consumes a turn subscription and accumulates text deltas
+// while Telegram's typing indicator remains active. It sends no partial message;
+// on agent_end it sends the complete response (split only when Telegram's
+// 4096-character limit requires it).
 func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTyping func()) {
 	if sub == nil {
 		return
 	}
 	defer sub.Close()
 	var buf strings.Builder
-	var msgID int64 // 0 = no message sent yet
-	var lastSent string
-	dirty := false
 	turnDone := false
 	if stopTyping == nil {
 		stopTyping = func() {}
 	}
-
-	ticker := time.NewTicker(b.editInterval)
-	defer ticker.Stop()
 
 	// idle watchdog: if no event arrives for idleTimeout, finalize and bail
 	// (guards against a stuck pi process; Slot.Events() is never closed).
@@ -938,28 +925,16 @@ func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTypin
 
 	finalize := func() {
 		stopTyping()
-		b.finalizeMessage(chatID, msgID, buf.String(), lastSent)
-	}
-
-	// flush emits a throttled edit of the current buffer (capped to the
-	// message limit). Skipped if nothing new or no message yet.
-	flush := func() {
-		if !dirty || msgID == 0 {
-			return
+		if sub.FinalText != nil {
+			final, ok := <-sub.FinalText
+			if !ok {
+				b.sendIncompleteTurnMessage(chatID)
+				return
+			}
+			buf.Reset()
+			buf.WriteString(final)
 		}
-		s := truncateRunes(buf.String(), TelegramMaxMessageLen)
-		if s == lastSent {
-			dirty = false
-			return
-		}
-		if err := b.api.EditMessageText(b.ctx, chatID, msgID, s); err != nil {
-			// "message is not modified" and rate-limit errors are logged but
-			// non-fatal; we keep accumulating and retry on the next tick.
-			log.Printf("telegram: editMessage chat %d: %v", chatID, err)
-			return
-		}
-		lastSent = s
-		dirty = false
+		b.finalizeMessage(chatID, buf.String())
 	}
 
 	for {
@@ -969,7 +944,8 @@ func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTypin
 			return
 		case ev, ok := <-sub.Events:
 			if !ok {
-				// Stream closed (process died or subscriber detached). Finalize with what we have.
+				// A completed turn has an authoritative final value; a process
+				// failure closes FinalText without one.
 				finalize()
 				return
 			}
@@ -980,32 +956,14 @@ func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTypin
 			case rpc.EventMessageUpdate:
 				if d, ok := decodeTextDelta(ev.Raw); ok && d != "" {
 					buf.WriteString(d)
-					dirty = true
-					if msgID == 0 {
-						// First delta: send the initial message so the user
-						// sees the reply start immediately.
-						m, err := b.api.SendMessage(b.ctx, chatID,
-							truncateRunes(buf.String(), TelegramMaxMessageLen), 0)
-						if err == nil {
-							msgID = m.MessageID
-							lastSent = truncateRunes(buf.String(), TelegramMaxMessageLen)
-							dirty = false
-							// Once a visible streaming message exists, stop refreshing
-							// Telegram's transient typing indicator. Edits do not reliably
-							// clear chat actions in every client, so continuing to refresh
-							// can make "typing…" linger after the turn is complete.
-							stopTyping()
-						}
-					}
 				}
 			case rpc.EventAgentEnd:
 				turnDone = true
 			}
-		case <-ticker.C:
-			flush()
 		case <-idleC:
-			log.Printf("telegram: turn idle for %s, finalizing chat %d", b.idleTimeout, chatID)
-			finalize()
+			log.Printf("telegram: turn idle for %s, ending delivery for chat %d", b.idleTimeout, chatID)
+			stopTyping()
+			b.sendIncompleteTurnMessage(chatID)
 			return
 		}
 		if turnDone {
@@ -1015,54 +973,42 @@ func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTypin
 	}
 }
 
-// finalizeMessage writes the final assistant text. If a streaming message
-// exists (msgID != 0) and the text fits, it's a final edit; if it exceeds the
-// limit, the first chunk pins the existing message and the rest are sent as
-// replies. If no streaming message exists (empty response), the whole text is
-// sent fresh (split if needed).
-//
+func (b *Bot) sendIncompleteTurnMessage(chatID int64) {
+	if _, err := b.api.SendMessage(b.ctx, chatID, "⚠️ response ended before completion", 0); err != nil {
+		log.Printf("telegram: send incomplete-turn notice chat %d: %v", chatID, err)
+	}
+}
+
+// finalizeMessage sends the complete assistant text after streaming ends.
 // Chunking is rune-safe: we split on rune boundaries at TelegramMaxMessageLen
 // so multi-byte text never produces an invalid UTF-8 boundary. Telegram's
 // limit is 4096 "characters" (UTF-16 code units for the API); for BMP text
 // runes == chars, which is the common case. Non-BMP (emoji) may occasionally
 // allow one fewer chunk than the limit permits — acceptable for v1.
-func (b *Bot) finalizeMessage(chatID int64, msgID int64, final string, lastSent string) {
-	runes := []rune(final)
-
-	if msgID == 0 {
-		text := final
-		if text == "" {
-			text = "(no response)"
-		}
-		b.sendChunks(chatID, []rune(text), 0)
+func (b *Bot) finalizeMessage(chatID int64, final string) {
+	if final == "" {
 		return
 	}
-
-	if len(runes) <= TelegramMaxMessageLen {
-		if final != lastSent {
-			_ = b.api.EditMessageText(b.ctx, chatID, msgID, final)
-		}
-		return
-	}
-
-	// Final text exceeds the limit: pin the first chunk in the existing
-	// message, then send the rest as replies.
-	first := string(runes[:TelegramMaxMessageLen])
-	if first != lastSent {
-		_ = b.api.EditMessageText(b.ctx, chatID, msgID, first)
-	}
-	b.sendChunks(chatID, runes[TelegramMaxMessageLen:], msgID)
+	b.sendChunks(chatID, []rune(final))
 }
 
-// sendChunks sends runes as a sequence of <=TelegramMaxMessageLen-char messages,
-// each replying to replyTo (0 = no reply).
-func (b *Bot) sendChunks(chatID int64, runes []rune, replyTo int64) {
+// sendChunks sends runes as a sequence of <=TelegramMaxMessageLen-character
+// messages. Later chunks reply to the first chunk.
+func (b *Bot) sendChunks(chatID int64, runes []rune) {
+	var replyTo int64
 	for len(runes) > 0 {
 		n := len(runes)
 		if n > TelegramMaxMessageLen {
 			n = TelegramMaxMessageLen
 		}
-		_, _ = b.api.SendMessage(b.ctx, chatID, string(runes[:n]), replyTo)
+		m, err := b.api.SendMessage(b.ctx, chatID, string(runes[:n]), replyTo)
+		if err != nil {
+			log.Printf("telegram: send final message chat %d: %v", chatID, err)
+			return
+		}
+		if replyTo == 0 {
+			replyTo = m.MessageID
+		}
 		runes = runes[n:]
 	}
 }
