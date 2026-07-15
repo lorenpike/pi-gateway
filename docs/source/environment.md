@@ -83,8 +83,23 @@ variable; see [Composio](composio).
 |---|---|---|
 | `HOME` | `/home/wall-e` | Home directory for the gateway, pi, persisted user configuration, and projects. |
 | `PI_CODING_AGENT_DIR` | `/opt/pi` | pi configuration, auth, appended system prompt, and skills directory. |
+| `COLORTERM` | unset | Terminal color capability. Set to `truecolor` to advertise 24-bit color to terminal applications. |
+| `LANG` | unset | Default process locale. Set to `C.UTF-8` so pi and child processes handle Unicode text. |
+| `LC_ALL` | unset | Overrides all locale categories. Set to `C.UTF-8` to keep the container consistently UTF-8. |
 | `TZ` | image/system default | Container timezone. `make docker` forwards the host value when set. |
 | `PATH` | image-defined | Resolves `pi` and other installed tools. Cron and at wrappers should set an explicit minimal path. |
+
+`make docker` forwards `COLORTERM`, `LANG`, and `LC_ALL` when they are set. The
+recommended project-root `.env` settings are:
+
+```sh
+COLORTERM=truecolor
+LANG=C.UTF-8
+LC_ALL=C.UTF-8
+```
+
+The UTF-8 locale settings are required for reliable Unicode input and output;
+`COLORTERM` controls color support rather than character encoding.
 
 Cron jobs do not inherit the full container or pi-worker environment. See
 [Cron jobs](cron) for the recommended job environment and private env-file
