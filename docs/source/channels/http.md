@@ -2,6 +2,8 @@
 
 The HTTP front-end exposes the prompt API over the worker pool plus a local read-only session-debug UI. It does **not** re-serialize same-channel prompt requests itself — the pool does — it only bounds the Acquire wait with a queue timeout and streams pi events back as SSE.
 
+HTTP is intentionally a **raw streaming transport** for applications such as the `wall-e` CLI. It does not apply buffered chat presentation controls. In particular, if the assistant's complete output is `NO_REPLY`, HTTP still emits that text as ordinary `delta` events followed by `agent_end` and `done`. The calling application may interpret the text itself, but the HTTP gateway does not remove or rewrite it.
+
 ## Endpoints
 
 ### `GET /health`
@@ -46,7 +48,7 @@ Bearer auth (`WALLE_TOKEN`). Body:
 - `channel` (required) — the stable id within that channel type. For `http`, pick anything stable per conversation. For `telegram`, use the Telegram chat id.
 - `message` (required) — the user prompt text.
 
-On success it returns `200` with `Content-Type: text/event-stream` and streams the turn as SSE until `agent_end`, then a terminal `done` event. The target delivery adapter may also deliver the assistant response externally; for example `channelType: "telegram"` sends the assistant response to that Telegram chat while still streaming the same response to the HTTP caller.
+On success it returns `200` with `Content-Type: text/event-stream` and streams the turn as SSE until `agent_end`, then a terminal `done` event. The target delivery adapter may also deliver the assistant response externally; for example `channelType: "telegram"` sends the assistant response to that Telegram chat while still streaming the same response to the HTTP caller. These subscribers deliberately have different presentation policies: HTTP preserves every text delta, while a buffered external channel may suppress its own delivery when the authoritative final response is exactly `NO_REPLY`.
 
 ## SSE event format
 
