@@ -139,16 +139,16 @@ def main() -> int:
     VERSION_FILE.write_text(f"{new}\n", encoding="utf-8")
     CHANGELOG.write_text(changelog, encoding="utf-8")
     print(
-        f"""Updated {VERSION_FILE.relative_to(ROOT)} and CHANGELOG.md.
+        f"""Modified: {VERSION_FILE.relative_to(ROOT)} CHANGELOG.md.
 
 Review and release with:
-  git add CHANGELOG.md src/version/VERSION
-  git commit -m "Release v{new}"
-  git switch main
-  git merge {branch}
-  make push
-  git tag v{new}
-  git push millie main v{new}
+git add CHANGELOG.md src/version/VERSION;
+git commit -m "Making release v{new}";
+git switch main;
+git merge {branch};
+make push;
+git tag v{new};
+git push millie main v{new};
 """
     )
     return 0
