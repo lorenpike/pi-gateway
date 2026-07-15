@@ -4,6 +4,29 @@ A single Go binary (`wall-e`) that runs inside an Ubuntu container and exposes a
 small HTTP API over a fixed pool of `pi --mode rpc` child processes. The gateway
 translates between HTTP/chat-platform events and pi's JSONL RPC protocol.
 
+## Why?
+
+`wall-e` is *softerware*: software to use software.
+
+A lot of useful software is difficult to use directly. SQLite and its
+accompanying `sqlite3` CLI are excellent, but using the CLI requires writing
+lengthy commands. We humans do well with commands under 30 characters long.
+That difficulty has produced a class of programs whose main purpose is to
+provide simpler interfaces to other programs: database front ends,
+document-conversion front ends around Pandoc, and media-conversion front ends around FFmpeg. An
+agent can make some of that interface layer unnecessary. The user describes the
+operation; `wall-e` can easily use these tools to perform it.
+
+This resembles Andrej Karpathy's
+[MenuGen](https://karpathy.bearblog.dev/sequoia-ascent-2026/#3-menugen-and-the-moment-software-disappears).
+Once a model could perform the intended transformation directly,
+much of the conventional app no longer needed to exist. Likewise, a program
+whose main job is to expose another program may no longer need to be a separate
+application.
+
+OpenClaw is another example of *softerware*. `wall-e` has a narrower scope and
+fewer moving parts.
+
 ## Run the gateway
 
 The gateway is configured entirely via `WALLE_*` env vars. `WALLE_TOKEN` is
