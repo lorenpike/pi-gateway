@@ -10,12 +10,13 @@ translates between HTTP/chat-platform events and pi's JSONL RPC protocol.
 
 A lot of useful software is difficult to use directly. SQLite and its
 accompanying `sqlite3` CLI are excellent, but using the CLI requires writing
-lengthy commands. We humans do well with commands under 30 characters long.
-That difficulty has produced a class of programs whose main purpose is to
-provide simpler interfaces to other programs: database front ends,
-document-conversion front ends around Pandoc, and media-conversion front ends around FFmpeg. An
-agent can make some of that interface layer unnecessary. The user describes the
-operation; `wall-e` can easily use these tools to perform it.
+lengthy commands. We humans do well with typed commands under 65 characters
+long, but longer than that is difficult (Noah's guesstimate). That difficulty
+has produced a class of programs whose main purpose is to provide simpler
+interfaces to other programs: database front ends, document-conversion front
+ends around Pandoc, and media-conversion front ends around FFmpeg. An agent can
+make some of that interface layer unnecessary. The user describes the operation;
+`wall-e` can use good tools to perform it.
 
 This resembles Andrej Karpathy's
 [MenuGen](https://karpathy.bearblog.dev/sequoia-ascent-2026/#3-menugen-and-the-moment-software-disappears).
