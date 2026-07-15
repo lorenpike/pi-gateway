@@ -794,91 +794,34 @@ func (b *Bot) sendTypingAction(ctx context.Context, chatID int64) {
 	}
 }
 
-// streamSubscription consumes a turn subscription and accumulates text deltas
-// while Telegram's typing indicator remains active. It sends no partial message;
-// on agent_end it sends the complete response (split only when Telegram's
-// 4096-character limit requires it).
+// streamSubscription keeps Telegram's typing indicator active while the shared
+// buffered-delivery helper waits for authoritative completion. Assistant deltas
+// are never exposed to Telegram.
 func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTyping func()) {
 	if sub == nil {
 		return
 	}
 	defer sub.Close()
-	var buf strings.Builder
-	turnDone := false
 	if stopTyping == nil {
 		stopTyping = func() {}
 	}
 
-	// idle watchdog: if no event arrives for idleTimeout, finalize and bail
-	// (guards against a stuck pi process; Slot.Events() is never closed).
-	var idle *time.Timer
-	var idleC <-chan time.Time
-	if b.idleTimeout > 0 {
-		idle = time.NewTimer(b.idleTimeout)
-		defer idle.Stop()
-		idleC = idle.C
-	}
-	resetIdle := func() {
-		if idle != nil {
-			if !idle.Stop() {
-				select {
-				case <-idle.C:
-				default:
-				}
-			}
-			idle.Reset(b.idleTimeout)
-		}
-	}
-
-	finalize := func() {
-		stopTyping()
-		if sub.FinalText != nil {
-			final, ok := <-sub.FinalText
-			if !ok {
-				b.sendIncompleteTurnMessage(chatID)
-				return
-			}
-			buf.Reset()
-			buf.WriteString(final)
-		}
-		b.finalizeMessage(chatID, buf.String())
-	}
-
-	for {
-		select {
-		case <-b.ctx.Done():
-			stopTyping()
+	reply, err := awaitBufferedReply(b.ctx, sub, b.idleTimeout)
+	stopTyping()
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
-		case ev, ok := <-sub.Events:
-			if !ok {
-				// A completed turn has an authoritative final value; a process
-				// failure closes FinalText without one.
-				finalize()
-				return
-			}
-			resetIdle()
-			switch ev.Type {
-			case rpc.EventAgentStart:
-				// nothing
-			case rpc.EventMessageUpdate:
-				if d, ok := decodeTextDelta(ev.Raw); ok && d != "" {
-					buf.WriteString(d)
-				}
-			case rpc.EventAgentEnd:
-				outcome, err := rpc.DecodeAgentEndOutcome(ev.Raw)
-				turnDone = err != nil || !outcome.WillRetry
-			}
-		case <-idleC:
+		}
+		if errors.Is(err, errBufferedReplyIdle) {
 			log.Printf("telegram: turn idle for %s, ending delivery for chat %d", b.idleTimeout, chatID)
-			stopTyping()
-			b.sendIncompleteTurnMessage(chatID)
-			return
 		}
-		if turnDone {
-			finalize()
-			return
-		}
+		b.sendIncompleteTurnMessage(chatID)
+		return
 	}
+	if reply.Suppressed {
+		return
+	}
+	b.finalizeMessage(chatID, reply.Text)
 }
 
 func (b *Bot) sendIncompleteTurnMessage(chatID int64) {

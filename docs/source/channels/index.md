@@ -17,11 +17,11 @@ The distinction is intentional. HTTP is an application-facing event transport us
 
 ### Buffered `NO_REPLY` control
 
-A buffered client-facing channel may interpret a complete assistant response whose trimmed text is exactly `NO_REPLY` as a delivery control: stop the typing/activity indicator and send no assistant message. Matching is case-sensitive and whole-response only; `NO_REPLY` inside ordinary prose, Markdown, or a larger response is visible text.
+A buffered client-facing channel interprets a complete assistant response whose trimmed text is exactly `NO_REPLY` as a delivery control: stop the typing/activity indicator and send no assistant message. Matching is case-sensitive and whole-response only; `NO_REPLY` inside ordinary prose, Markdown, or a larger response is visible text.
 
 This control applies only at buffered delivery. HTTP/SSE continues to expose the raw `NO_REPLY` text, direct `wall-e send` delivery is unaffected, and the underlying pi transcript retains the assistant output. If an HTTP prompt targets Telegram or Discord, the HTTP subscriber therefore sees the raw stream while the external chat adapter suppresses its buffered reply.
 
-The shared buffered-channel implementation and required tests are planned in [`impl/20260714--no-reply.md`](https://github.com/lorenpike/pi-gateway/blob/main/impl/20260714--no-reply.md). Until that plan is implemented, consult each channel page for its current delivery behavior.
+Telegram and Discord share the same authoritative-completion helper for this behavior. The implementation design and test requirements are recorded in [`impl/20260714--no-reply.md`](https://github.com/lorenpike/pi-gateway/blob/main/impl/20260714--no-reply.md).
 
 Same-channel reuse stays **warm** (the process is not killed) for fast follow-up turns. Cross-channel reuse claims the LRU idle slot and respawns the process so runtime channel identity remains correct.
 

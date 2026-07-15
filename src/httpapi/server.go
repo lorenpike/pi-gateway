@@ -20,6 +20,8 @@ package httpapi
 // -----------------
 //   pi EventAgentStart  → event: agent_start\ndata: {}\n\n
 //   pi EventMessageUpdate with text_delta → event: delta\ndata: {"text":...}\n\n
+//   direct HTTP text send                  → event: message\ndata: {"text":...}\n\n
+//   direct HTTP media send                 → event: attachment\ndata: {...}\n\n
 //   terminal pi EventAgentEnd → event: agent_end\ndata: {}\n\n
 //   turn complete             → event: done\ndata: {}\n\n
 //   provider/stream error      → event: error\ndata: {"message":"..."}\n\n then close
@@ -79,16 +81,18 @@ type Config struct {
 	PromptAdapters map[string]PromptAdapter
 	// MaxPromptBytes bounds JSON prompt request bodies. Defaults to 8 MiB.
 	MaxPromptBytes int64
-	// SendAdapters route typed /v1/send requests by channelType. Telegram and
-	// Discord register their direct-delivery adapters from main.
+	// SendAdapters route typed /v1/send requests by channelType. New always
+	// installs/overwrites the "http" adapter. Telegram and Discord register
+	// their direct-delivery adapters from main.
 	SendAdapters map[string]SendAdapter
 }
 
 // Server is the wall-e HTTP gateway.
 type Server struct {
-	cfg  Config
-	pool *pool.Pool
-	mux  *http.ServeMux
+	cfg            Config
+	pool           *pool.Pool
+	mux            *http.ServeMux
+	httpDeliveries *httpDeliveryHub
 }
 
 // PromptAdapter handles one typed channel target for /v1/prompt.
@@ -174,7 +178,12 @@ func New(cfg Config, p *pool.Pool) *Server {
 	if cfg.MaxPromptBytes <= 0 {
 		cfg.MaxPromptBytes = 8 << 20
 	}
-	s := &Server{cfg: cfg, pool: p, mux: http.NewServeMux()}
+	if cfg.SendAdapters == nil {
+		cfg.SendAdapters = make(map[string]SendAdapter)
+	}
+	httpDeliveries := newHTTPDeliveryHub()
+	cfg.SendAdapters["http"] = httpSendAdapter{hub: httpDeliveries}
+	s := &Server{cfg: cfg, pool: p, mux: http.NewServeMux(), httpDeliveries: httpDeliveries}
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/v1/prompt", s.handlePrompt)
 	s.mux.HandleFunc("/v1/send", s.handleSend)
@@ -405,6 +414,15 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var httpDeliveryC <-chan httpDelivery
+	unsubscribeHTTP := func() {}
+	if req.ChannelType == "http" {
+		deliverySub, unsubscribe := s.httpDeliveries.subscribe(req.Channel)
+		unsubscribeHTTP = unsubscribe
+		defer unsubscribeHTTP()
+		httpDeliveryC = deliverySub.deliveries
+	}
+
 	message := req.Message
 	if len(req.Attachments) > 0 {
 		store, err := s.mediaStore()
@@ -482,6 +500,9 @@ streamLoop:
 		select {
 		case <-r.Context().Done():
 			return
+		case delivery := <-httpDeliveryC:
+			writeHTTPDeliverySSE(w, delivery)
+			flusher.Flush()
 		case ev, ok := <-sub.Events:
 			if !ok {
 				break streamLoop
@@ -492,6 +513,8 @@ streamLoop:
 			case rpc.EventAgentEnd:
 				outcome, err := rpc.DecodeAgentEndOutcome(ev.Raw)
 				if err != nil {
+					unsubscribeHTTP()
+					drainHTTPDeliveries(w, httpDeliveryC)
 					b, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("invalid agent_end event: %v", err)})
 					writeSSE(w, "error", string(b))
 					flusher.Flush()
@@ -500,6 +523,8 @@ streamLoop:
 				if outcome.WillRetry {
 					continue
 				}
+				unsubscribeHTTP()
+				drainHTTPDeliveries(w, httpDeliveryC)
 				if outcome.ErrorMessage != "" {
 					b, _ := json.Marshal(map[string]string{"message": outcome.ErrorMessage})
 					writeSSE(w, "error", string(b))
@@ -526,6 +551,11 @@ streamLoop:
 			}
 		}
 	}
+
+	// Stop accepting sends, then flush deliveries queued just before the turn
+	// completed or its event channel closed.
+	unsubscribeHTTP()
+	drainHTTPDeliveries(w, httpDeliveryC)
 
 	// Emit done only when we observed a clean agent_end.
 	if turnDone {
@@ -623,7 +653,9 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	res, err := adapter.Send(r.Context(), SendRequest{Channel: req.Channel, Text: req.Text, MediaPath: req.MediaPath, Caption: req.Caption})
 	if err != nil {
 		code := 502
-		if strings.Contains(err.Error(), "not allowed") {
+		if errors.Is(err, errNoHTTPReceiver) {
+			code = 409
+		} else if strings.Contains(err.Error(), "not allowed") {
 			code = 403
 		}
 		writeJSON(w, code, sendResponse{OK: false, Error: err.Error()})
@@ -664,6 +696,25 @@ func decodeTextDelta(raw json.RawMessage) (string, bool) {
 // writeSSE writes one SSE event: "event: <name>\ndata: <data>\n\n".
 func writeSSE(w http.ResponseWriter, name, data string) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data)
+}
+
+func writeHTTPDeliverySSE(w http.ResponseWriter, delivery httpDelivery) {
+	data, err := json.Marshal(delivery.Data)
+	if err != nil {
+		return
+	}
+	writeSSE(w, delivery.Event, string(data))
+}
+
+func drainHTTPDeliveries(w http.ResponseWriter, deliveries <-chan httpDelivery) {
+	for {
+		select {
+		case delivery := <-deliveries:
+			writeHTTPDeliverySSE(w, delivery)
+		default:
+			return
+		}
+	}
 }
 
 func safeDownloadName(s string) string {

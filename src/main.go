@@ -120,7 +120,11 @@ Environment for msg:
 `)
 }
 
-const cliMaxPromptBytes = 8 << 20
+const (
+	cliMaxPromptBytes = 8 << 20
+	// HTTP attachment SSE events may contain 32 MiB of base64-encoded media.
+	cliMaxSSEEventBytes = 48 << 20
+)
 
 type cliPromptAttachment struct {
 	FileName string `json:"fileName"`
@@ -408,7 +412,7 @@ func readPromptStdin(r io.Reader) (string, error) {
 
 func consumeSSE(r io.Reader, out io.Writer) error {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), cliMaxPromptBytes+1024)
+	sc.Buffer(make([]byte, 0, 64*1024), cliMaxSSEEventBytes)
 	event := "message"
 	var dataLines []string
 	dispatch := func() (bool, error) {

@@ -21,25 +21,27 @@ import (
 )
 
 type fakeDiscordAPI struct {
-	mu                 sync.Mutex
-	handlers           DiscordHandlers
-	intents            DiscordIntent
-	openErr            error
-	open               bool
-	closed             bool
-	ready              DiscordReady
-	commands           []DiscordCommand
-	registerErr        error
-	sends              []DiscordSend
-	edits              []DiscordEdit
-	deletes            [][2]string
-	typing             []string
-	responses          []DiscordInteractionResponse
-	interactionEdits   []DiscordEdit
-	followups          []DiscordSend
-	sendErrorAt        map[int]error
-	interactionEditErr error
-	sequence           []string
+	mu                   sync.Mutex
+	handlers             DiscordHandlers
+	intents              DiscordIntent
+	openErr              error
+	open                 bool
+	closed               bool
+	ready                DiscordReady
+	commands             []DiscordCommand
+	registerErr          error
+	sends                []DiscordSend
+	edits                []DiscordEdit
+	deletes              [][2]string
+	typing               []string
+	responses            []DiscordInteractionResponse
+	interactionEdits     []DiscordEdit
+	interactionDeletes   []DiscordInteraction
+	followups            []DiscordSend
+	sendErrorAt          map[int]error
+	interactionEditErr   error
+	interactionDeleteErr error
+	sequence             []string
 }
 
 func newFakeDiscordAPI() *fakeDiscordAPI {
@@ -109,6 +111,13 @@ func (a *fakeDiscordAPI) EditInteractionResponse(_ context.Context, _ DiscordInt
 	a.interactionEdits = append(a.interactionEdits, edit)
 	a.sequence = append(a.sequence, "interaction-edit")
 	return a.interactionEditErr
+}
+func (a *fakeDiscordAPI) DeleteInteractionResponse(_ context.Context, interaction DiscordInteraction) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.interactionDeletes = append(a.interactionDeletes, interaction)
+	a.sequence = append(a.sequence, "interaction-delete")
+	return a.interactionDeleteErr
 }
 func (a *fakeDiscordAPI) CreateInteractionFollowup(_ context.Context, _ DiscordInteraction, send DiscordSend) (DiscordMessage, error) {
 	a.mu.Lock()
@@ -259,13 +268,13 @@ func TestDiscordGuildDMAndThreadUseEventChannelIdentity(t *testing.T) {
 	}
 }
 
-func TestDiscordMessageStreamingIdentityTypingAndMentions(t *testing.T) {
+func TestDiscordMessageBuffersUntilCompletionIdentityTypingAndMentions(t *testing.T) {
 	api := newFakeDiscordAPI()
 	script := []scriptedEvent{{kind: "delta", text: "Hello @everyone"}, {kind: "delta", text: " **world**", delay: 15 * time.Millisecond}, {kind: "agent_end", delay: 10 * time.Millisecond}}
 	p, ff, sm := testPoolWithManager(t, makeScriptedHandler(script, nil))
 	newStartedDiscordBot(t, p, api, DiscordConfig{AllowedChannels: []string{"123"}})
 	api.emitMessage(DiscordMessage{ID: "1", ChannelID: "123", GuildID: "55", Author: &DiscordUser{ID: "7"}, Content: "hi"})
-	waitDiscord(t, func() bool { _, _, deletes, _ := api.snapshot(); return len(deletes) == 1 })
+	waitDiscord(t, func() bool { sends, _, _, _ := api.snapshot(); return len(sends) == 1 })
 	fake := ff.first()
 	if fake == nil || !fake.contains(`"type":"prompt"`) {
 		t.Fatal("prompt missing")
@@ -275,14 +284,14 @@ func TestDiscordMessageStreamingIdentityTypingAndMentions(t *testing.T) {
 		t.Fatalf("session=%s", cur)
 	}
 	sends, edits, deletes, typing := api.snapshot()
-	if len(sends) != 2 || sends[0].Content != "Hello @everyone" || sends[1].Content != "Hello @everyone **world**" {
+	if len(sends) != 1 || sends[0].Content != "Hello @everyone **world**" {
 		t.Fatalf("sends=%+v", sends)
 	}
-	if len(edits) == 0 {
-		t.Fatal("expected throttled preview edit")
+	if len(edits) != 0 || len(deletes) != 0 {
+		t.Fatalf("ordinary buffered delivery made preview edits/deletes: edits=%v deletes=%v", edits, deletes)
 	}
-	if len(typing) == 0 || deletes[0][1] != "m1" {
-		t.Fatalf("typing=%v deletes=%v", typing, deletes)
+	if len(typing) == 0 {
+		t.Fatalf("typing=%v", typing)
 	}
 	for _, send := range sends {
 		mentionsDisabled(t, send.AllowedMentions)
@@ -360,20 +369,17 @@ func TestDiscordChunkingPreservesTextAndCountsNonBMP(t *testing.T) {
 	}
 }
 
-func TestDiscordFinalFailureRetainsPreviewAndAttemptsRemaining(t *testing.T) {
+func TestDiscordFinalFailureAttemptsRemainingChunksWithoutPreview(t *testing.T) {
 	api := newFakeDiscordAPI()
-	api.sendErrorAt[1] = errors.New("final failed")
+	api.sendErrorAt[0] = errors.New("final failed")
 	big := strings.Repeat("x", 2500)
-	p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: "preview"}, {kind: "delta", text: big}, {kind: "agent_end"}}, nil))
+	p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: big}, {kind: "agent_end"}}, nil))
 	newStartedDiscordBot(t, p, api, DiscordConfig{})
 	api.emitMessage(DiscordMessage{ChannelID: "123", Author: &DiscordUser{ID: "7"}, Content: "go"})
-	waitDiscord(t, func() bool { sends, edits, _, _ := api.snapshot(); return len(sends) >= 3 && len(edits) > 0 })
+	waitDiscord(t, func() bool { sends, _, _, _ := api.snapshot(); return len(sends) == 2 })
 	_, edits, deletes, _ := api.snapshot()
-	if len(deletes) != 0 {
-		t.Fatal("preview deleted after final failure")
-	}
-	if edits[len(edits)-1].Content != splitDiscordText("preview" + big)[0] {
-		t.Fatalf("fallback edit len=%d", len(edits[len(edits)-1].Content))
+	if len(edits) != 0 || len(deletes) != 0 {
+		t.Fatalf("final failure used preview fallback: edits=%v deletes=%v", edits, deletes)
 	}
 }
 
@@ -457,7 +463,7 @@ func TestDiscordPromptAndDirectSend(t *testing.T) {
 	if fake == nil || !fake.waitForCommand("from HTTP", time.Second) {
 		t.Fatal("HTTP prompt missing")
 	}
-	waitDiscord(t, func() bool { sends, _, _, _ := api.snapshot(); return len(sends) >= 2 })
+	waitDiscord(t, func() bool { sends, _, _, _ := api.snapshot(); return len(sends) >= 1 })
 	if _, err := bot.Prompt(context.Background(), "999", "no"); err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("disallowed prompt=%v", err)
 	}
@@ -486,7 +492,7 @@ func TestDiscordPromptAndDirectSend(t *testing.T) {
 func TestDiscordInteractionsDeferDenyStreamAndFallback(t *testing.T) {
 	api := newFakeDiscordAPI()
 	final := strings.Repeat("x", 2100)
-	p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: final}, {kind: "agent_end"}}, nil))
+	p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: final}, {kind: "agent_end", delay: 100 * time.Millisecond}}, nil))
 	bot := newStartedDiscordBot(t, p, api, DiscordConfig{AllowedChannels: []string{"123"}, CommandProvider: func(context.Context) ([]rpc.Command, error) {
 		return []rpc.Command{{Name: "fix-tests", Source: "prompt"}}, nil
 	}})
@@ -497,6 +503,13 @@ func TestDiscordInteractionsDeferDenyStreamAndFallback(t *testing.T) {
 	}
 	api.mu.Unlock()
 	api.emitInteraction(DiscordInteraction{ID: "ok", ApplicationID: "888", Token: "t", ChannelID: "123", Name: "fix_tests", Options: map[string]string{"args": "now"}})
+	time.Sleep(30 * time.Millisecond)
+	api.mu.Lock()
+	if len(api.responses) != 2 || api.responses[1].Type != DiscordInteractionDeferred || len(api.interactionEdits) != 0 {
+		api.mu.Unlock()
+		t.Fatalf("interaction was not deferred and buffered: responses=%+v edits=%v", api.responses, api.interactionEdits)
+	}
+	api.mu.Unlock()
 	waitDiscord(t, func() bool {
 		api.mu.Lock()
 		defer api.mu.Unlock()
@@ -561,6 +574,94 @@ func TestDiscordActivePiInteractionUsesPromptSteerAndAcknowledges(t *testing.T) 
 		t.Fatalf("ack=%q", ack)
 	}
 	close(release)
+}
+
+func TestDiscordOrdinaryMessageDoesNotDeliverBeforeCompletion(t *testing.T) {
+	api := newFakeDiscordAPI()
+	p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: "buffered"}, {kind: "agent_end", delay: 150 * time.Millisecond}}, nil))
+	newStartedDiscordBot(t, p, api, DiscordConfig{})
+	api.emitMessage(DiscordMessage{ChannelID: "123", Author: &DiscordUser{ID: "7"}, Content: "go"})
+	time.Sleep(40 * time.Millisecond)
+	sends, edits, _, typing := api.snapshot()
+	if len(sends) != 0 || len(edits) != 0 {
+		t.Fatalf("delivery before completion: sends=%v edits=%v", sends, edits)
+	}
+	if len(typing) == 0 {
+		t.Fatal("typing did not start while reply was buffered")
+	}
+	waitDiscord(t, func() bool { sends, _, _, _ := api.snapshot(); return len(sends) == 1 })
+	_, _, _, typing = api.snapshot()
+	count := len(typing)
+	time.Sleep(20 * time.Millisecond)
+	_, _, _, typing = api.snapshot()
+	if len(typing) != count {
+		t.Fatalf("typing continued after completion: before=%d after=%d", count, len(typing))
+	}
+}
+
+func TestDiscordOrdinaryNoReplySuppression(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want int
+	}{
+		{"exact", "NO_REPLY", 0},
+		{"whitespace", " \u2003NO_REPLY\n", 0},
+		{"prose", "Do not quote NO_REPLY here.", 1},
+		{"lowercase", "no_reply", 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newFakeDiscordAPI()
+			p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: tt.text}, {kind: "agent_end"}}, nil))
+			bot := newStartedDiscordBot(t, p, api, DiscordConfig{})
+			api.emitMessage(DiscordMessage{ChannelID: "123", Author: &DiscordUser{ID: "7"}, Content: "go"})
+			waitDiscord(t, func() bool {
+				if tt.want > 0 {
+					sends, _, _, _ := api.snapshot()
+					return len(sends) == tt.want
+				}
+				return !bot.turns.Active(discordChannelID("123"))
+			})
+			sends, edits, deletes, _ := api.snapshot()
+			if len(sends) != tt.want || len(edits) != 0 || len(deletes) != 0 {
+				t.Fatalf("sends=%v edits=%v deletes=%v", sends, edits, deletes)
+			}
+			if tt.want > 0 && sends[0].Content != tt.text {
+				t.Fatalf("content=%q want=%q", sends[0].Content, tt.text)
+			}
+		})
+	}
+}
+
+func TestDiscordInteractionNoReplyDeletesDeferredResponse(t *testing.T) {
+	for _, deleteErr := range []error{nil, errors.New("delete failed")} {
+		name := "success"
+		if deleteErr != nil {
+			name = "delete_failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			api := newFakeDiscordAPI()
+			api.interactionDeleteErr = deleteErr
+			p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: "NO_REPLY"}, {kind: "agent_end"}}, nil))
+			newStartedDiscordBot(t, p, api, DiscordConfig{CommandProvider: func(context.Context) ([]rpc.Command, error) {
+				return []rpc.Command{{Name: "silent", Source: "prompt"}}, nil
+			}})
+			api.emitInteraction(DiscordInteraction{ID: "silent", ApplicationID: "888", Token: "token", ChannelID: "123", Name: "silent"})
+			waitDiscord(t, func() bool {
+				api.mu.Lock()
+				defer api.mu.Unlock()
+				return len(api.interactionDeletes) == 1
+			})
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			if len(api.responses) != 1 || api.responses[0].Type != DiscordInteractionDeferred {
+				t.Fatalf("responses=%+v", api.responses)
+			}
+			if len(api.interactionEdits) != 0 || len(api.followups) != 0 {
+				t.Fatalf("suppression produced visible output: edits=%v followups=%v", api.interactionEdits, api.followups)
+			}
+		})
+	}
 }
 
 func TestDiscordCommandRegistrySanitizeCollisionAndCap(t *testing.T) {

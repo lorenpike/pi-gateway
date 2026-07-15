@@ -408,6 +408,64 @@ func TestTelegram_FinalMessageUsesAuthoritativeTextForBurstyDeltas(t *testing.T)
 	}
 }
 
+func TestTelegramNoReplySuppressionUsesWholeAuthoritativeResponse(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		wantSends int
+	}{
+		{"exact", "NO_REPLY", 0},
+		{"whitespace", " \u2003NO_REPLY\n", 0},
+		{"prose", "Use NO_REPLY when appropriate.", 1},
+		{"lowercase", "no_reply", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newFakeTelegramAPI(99)
+			p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: tt.text}, {kind: "agent_end"}}, nil))
+			bot := newTestBot(t, p, api)
+			bot.handleMessage(Message{Chat: Chat{ID: 42}, From: User{ID: 7}, Text: "go"})
+			if got := api.sendCount(); got != tt.wantSends {
+				t.Fatalf("sendMessage calls=%d, want %d", got, tt.wantSends)
+			}
+			if tt.wantSends > 0 && api.lastSendText() != tt.text {
+				t.Fatalf("sent text=%q, want %q", api.lastSendText(), tt.text)
+			}
+			if api.actionCount(42, telegramTypingAction) == 0 {
+				t.Fatal("typing indicator did not start")
+			}
+		})
+	}
+}
+
+func TestTelegramHTTPSubscriberSeesNoReplyWhileTelegramSuppresses(t *testing.T) {
+	api := newFakeTelegramAPI(99)
+	p, _ := testPool(t, makeScriptedHandler([]scriptedEvent{{kind: "delta", text: "NO_REPLY"}, {kind: "agent_end"}}, nil))
+	bot := newTestBot(t, p, api, 42)
+
+	sub, err := bot.Prompt(context.Background(), "42", "automated prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	var raw strings.Builder
+	for event := range sub.Events {
+		if event.Type == rpc.EventMessageUpdate {
+			if delta, ok := decodeTextDelta(event.Raw); ok {
+				raw.WriteString(delta)
+			}
+		}
+	}
+	final, ok := <-sub.FinalText
+	if !ok || final != "NO_REPLY" || raw.String() != "NO_REPLY" {
+		t.Fatalf("raw=%q final=%q ok=%v", raw.String(), final, ok)
+	}
+	bot.turnsWG.Wait()
+	if api.sendCount() != 0 {
+		t.Fatalf("Telegram delivered suppressed response: %+v", api.sendsFor(42))
+	}
+}
+
 func TestTelegram_MidStreamUserMessage_Steers(t *testing.T) {
 	api := newFakeTelegramAPI(99)
 	streamDone := make(chan struct{})

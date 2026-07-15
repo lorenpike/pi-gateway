@@ -115,14 +115,16 @@ func (f *fakePI) emitAssistantText(prefix, suffix string) {
 			"delta":        prefix,
 		},
 	})
-	f.writeJSON(map[string]any{
-		"type": "message_update",
-		"assistantMessageEvent": map[string]any{
-			"type":         "text_delta",
-			"contentIndex": 0,
-			"delta":        suffix,
-		},
-	})
+	if suffix != "" {
+		f.writeJSON(map[string]any{
+			"type": "message_update",
+			"assistantMessageEvent": map[string]any{
+				"type":         "text_delta",
+				"contentIndex": 0,
+				"delta":        suffix,
+			},
+		})
+	}
 	f.writeJSON(map[string]any{"type": "agent_end"})
 }
 

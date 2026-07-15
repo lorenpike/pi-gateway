@@ -136,6 +136,7 @@ type DiscordAPI interface {
 	TriggerTyping(context.Context, string) error
 	RespondInteraction(context.Context, DiscordInteraction, DiscordInteractionResponse) error
 	EditInteractionResponse(context.Context, DiscordInteraction, DiscordEdit) error
+	DeleteInteractionResponse(context.Context, DiscordInteraction) error
 	CreateInteractionFollowup(context.Context, DiscordInteraction, DiscordSend) (DiscordMessage, error)
 }
 
@@ -347,6 +348,10 @@ func (a *discordGoAPI) EditInteractionResponse(ctx context.Context, interaction 
 	content := edit.Content
 	_, err := a.session.InteractionResponseEdit(discordgoInteraction(interaction), &discordgo.WebhookEdit{Content: &content, AllowedMentions: discordgoMentions(edit.AllowedMentions)}, discordgo.WithContext(ctx))
 	return err
+}
+
+func (a *discordGoAPI) DeleteInteractionResponse(ctx context.Context, interaction DiscordInteraction) error {
+	return a.session.InteractionResponseDelete(discordgoInteraction(interaction), discordgo.WithContext(ctx))
 }
 
 func (a *discordGoAPI) CreateInteractionFollowup(ctx context.Context, interaction DiscordInteraction, send DiscordSend) (DiscordMessage, error) {

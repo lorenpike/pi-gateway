@@ -35,6 +35,7 @@ type fakeHandlerCfg struct {
 	promptError   string
 	agentError    string
 	retryThenText bool
+	assistantText string
 }
 
 func makeHandler(cfg fakeHandlerCfg) func(f *fakePI, cmd map[string]any) {
@@ -88,6 +89,8 @@ func makeHandler(cfg fakeHandlerCfg) func(f *fakePI, cmd map[string]any) {
 					case <-f.stop:
 					}
 				}()
+			} else if cfg.assistantText != "" {
+				f.emitAssistantText(cfg.assistantText, "")
 			} else {
 				f.emitAssistantText("Hello ", "world")
 			}
@@ -404,6 +407,91 @@ func TestSend_DirectDeliveryDoesNotPrompt(t *testing.T) {
 	}
 }
 
+func TestSend_HTTPMediaIsDeliveredOnActivePromptStream(t *testing.T) {
+	streamDone := make(chan struct{})
+	p, ff, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl", streamDone: streamDone}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+
+	promptReq := httptest.NewRequest(http.MethodPost, "/v1/prompt", strings.NewReader(`{"channelType":"http","channel":"c1","message":"wait"}`))
+	promptReq.Header.Set("Authorization", "Bearer sekret")
+	promptRR := httptest.NewRecorder()
+	promptDone := make(chan struct{})
+	go func() {
+		s.Handler().ServeHTTP(promptRR, promptReq)
+		close(promptDone)
+	}()
+	var fake *fakePI
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && fake == nil {
+		for _, candidate := range ff.all() {
+			fake = candidate
+			break
+		}
+		if fake == nil {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	if fake == nil || !fake.waitForCommand(`"type":"prompt"`, time.Second) {
+		t.Fatal("prompt did not start")
+	}
+
+	mediaPath := filepath.Join(t.TempDir(), "cat.jpg")
+	mediaBytes := []byte("fake-jpeg-data")
+	if err := os.WriteFile(mediaPath, mediaBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sendBody, _ := json.Marshal(sendRequest{ChannelType: "http", Channel: "c1", MediaPath: mediaPath, Caption: "A cat"})
+	sendRR := do(t, s, http.MethodPost, "/v1/send", "Bearer sekret", string(sendBody))
+	if sendRR.Code != http.StatusOK {
+		t.Fatalf("send status=%d body=%s", sendRR.Code, sendRR.Body.String())
+	}
+	close(streamDone)
+	select {
+	case <-promptDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("prompt stream did not complete")
+	}
+
+	events := readSSE(t, promptRR.Body, 2*time.Second)
+	var attachment *httpAttachmentDelivery
+	for _, event := range events {
+		if event.name != "attachment" {
+			continue
+		}
+		var got httpAttachmentDelivery
+		if err := json.Unmarshal([]byte(event.data), &got); err != nil {
+			t.Fatalf("decode attachment event: %v", err)
+		}
+		attachment = &got
+	}
+	if attachment == nil {
+		t.Fatalf("attachment event missing; events=%v", sseNames(events))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(attachment.Data)
+	if err != nil || !bytes.Equal(decoded, mediaBytes) {
+		t.Fatalf("attachment data=%q err=%v", decoded, err)
+	}
+	if attachment.FileName != "cat.jpg" || attachment.MimeType != "image/jpeg" || attachment.Caption != "A cat" {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+	if names := sseNames(events); names[len(names)-1] != "done" {
+		t.Fatalf("events=%v", names)
+	}
+}
+
+func TestSend_HTTPRequiresActivePromptReceiver(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+	rr := do(t, s, http.MethodPost, "/v1/send", "Bearer sekret", `{"channelType":"http","channel":"missing","text":"hello"}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "no active receiver") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestPrompt_NoToken_401(t *testing.T) {
 	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
 		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl"}
@@ -571,6 +659,27 @@ func TestPrompt_OK_StreamsSSE(t *testing.T) {
 	}
 	if text != "Hello world" {
 		t.Fatalf("concatenated delta text = %q, want %q", text, "Hello world")
+	}
+}
+
+func TestPromptNoReplyRemainsRawSSE(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl", assistantText: "NO_REPLY"}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channelType":"http","channel":"c1","message":"hi"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	events := readSSE(t, rr.Body, 2*time.Second)
+	if want := []string{"agent_start", "delta", "agent_end", "done"}; !equalStringSlices(sseNames(events), want) {
+		t.Fatalf("event names=%v, want %v", sseNames(events), want)
+	}
+	var delta struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(events[1].data), &delta); err != nil || delta.Text != "NO_REPLY" {
+		t.Fatalf("delta=%+v err=%v", delta, err)
 	}
 }
 

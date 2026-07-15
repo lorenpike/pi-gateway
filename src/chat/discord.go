@@ -23,19 +23,20 @@ import (
 const (
 	DiscordMaxMessageLen        = 2000
 	defaultDiscordReadyTimeout  = 15 * time.Second
-	defaultDiscordEditInterval  = time.Second
 	defaultDiscordTyping        = 8 * time.Second
 	defaultDiscordAttachmentMax = int64(32 << 20)
 )
 
 // DiscordConfig configures the Discord front-end.
 type DiscordConfig struct {
-	Token             string
-	AllowedChannels   []string
-	Turns             *turn.Manager
-	MediaStore        *media.Store
-	CommandProvider   func(context.Context) ([]rpc.Command, error)
-	ReadyTimeout      time.Duration
+	Token           string
+	AllowedChannels []string
+	Turns           *turn.Manager
+	MediaStore      *media.Store
+	CommandProvider func(context.Context) ([]rpc.Command, error)
+	ReadyTimeout    time.Duration
+	// EditInterval is retained for configuration compatibility. Buffered
+	// Discord replies no longer perform periodic preview edits.
 	EditInterval      time.Duration
 	TypingInterval    time.Duration
 	IdleTimeout       time.Duration
@@ -130,7 +131,6 @@ type DiscordBot struct {
 	commands        *discordCommandRegistry
 
 	readyTimeout   time.Duration
-	editInterval   time.Duration
 	typingInterval time.Duration
 	idleTimeout    time.Duration
 
@@ -173,10 +173,6 @@ func NewDiscord(cfg DiscordConfig, p *pool.Pool, api DiscordAPI) (*DiscordBot, e
 	if readyTimeout <= 0 {
 		readyTimeout = defaultDiscordReadyTimeout
 	}
-	editInterval := cfg.EditInterval
-	if editInterval <= 0 {
-		editInterval = defaultDiscordEditInterval
-	}
 	typingInterval := cfg.TypingInterval
 	if typingInterval <= 0 {
 		typingInterval = defaultDiscordTyping
@@ -201,8 +197,8 @@ func NewDiscord(cfg DiscordConfig, p *pool.Pool, api DiscordAPI) (*DiscordBot, e
 		api: api, pool: p, turns: turns, allowed: allowed, store: cfg.MediaStore,
 		fetcher: fetcher, attachmentMax: attachmentMax, commandProvider: cfg.CommandProvider,
 		commands: newDiscordCommandRegistry(nil), readyTimeout: readyTimeout,
-		editInterval: editInterval, typingInterval: typingInterval,
-		idleTimeout: idleTimeout, ready: make(chan DiscordReady, 1),
+		typingInterval: typingInterval, idleTimeout: idleTimeout,
+		ready: make(chan DiscordReady, 1),
 	}, nil
 }
 
@@ -450,121 +446,45 @@ func (b *DiscordBot) streamDiscordSubscription(channelID string, sub *turn.Subsc
 	}
 	defer sub.Close()
 	stopTyping := b.startDiscordTyping(channelID)
-	defer stopTyping()
 
-	var text strings.Builder
-	previewID := ""
-	dirty := false
-	ticker := time.NewTicker(b.editInterval)
-	defer ticker.Stop()
-	var idle *time.Timer
-	var idleC <-chan time.Time
-	if b.idleTimeout > 0 {
-		idle = time.NewTimer(b.idleTimeout)
-		defer idle.Stop()
-		idleC = idle.C
-	}
-	resetIdle := func() {
-		if idle == nil {
+	reply, err := awaitBufferedReply(b.ctx, sub, b.idleTimeout)
+	stopTyping()
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
-		if !idle.Stop() {
-			select {
-			case <-idle.C:
-			default:
-			}
+		if errors.Is(err, errBufferedReplyIdle) {
+			log.Printf("discord: turn idle for %s, ending delivery for channel %s", b.idleTimeout, channelID)
 		}
-		idle.Reset(b.idleTimeout)
+		b.sendChannelText(b.ctx, channelID, "⚠️ response ended before completion")
+		return
 	}
-	finalize := func() {
-		stopTyping()
-		final, ok := <-sub.FinalText
-		if !ok {
-			b.sendChannelText(b.ctx, channelID, "⚠️ response ended before completion")
-			return
-		}
-		if final == "" {
-			final = "(no response)"
-		}
-		b.deliverDiscordFinal(channelID, previewID, final)
+	if reply.Suppressed {
+		return
 	}
-
-	for {
-		select {
-		case <-b.ctx.Done():
-			return
-		case <-idleC:
-			b.sendChannelText(b.ctx, channelID, "⚠️ response ended before completion")
-			return
-		case <-ticker.C:
-			if previewID != "" && dirty {
-				_ = b.editChannelMessage(b.ctx, channelID, previewID, firstDiscordChunk(text.String()))
-				dirty = false
-			}
-		case event, ok := <-sub.Events:
-			if !ok {
-				finalize()
-				return
-			}
-			resetIdle()
-			if event.Type == rpc.EventMessageUpdate {
-				if delta, ok := decodeTextDelta(event.Raw); ok && delta != "" {
-					text.WriteString(delta)
-					if previewID == "" {
-						message, err := b.api.SendMessage(b.ctx, DiscordSend{ChannelID: channelID, Content: firstDiscordChunk(text.String()), AllowedMentions: noDiscordMentions()})
-						if err == nil {
-							previewID = message.ID
-							stopTyping()
-						}
-					} else {
-						dirty = true
-					}
-				}
-			}
-			if event.Type == rpc.EventAgentEnd {
-				outcome, err := rpc.DecodeAgentEndOutcome(event.Raw)
-				if err != nil || !outcome.WillRetry {
-					finalize()
-					return
-				}
-			}
-		}
+	final := reply.Text
+	if final == "" {
+		final = "(no response)"
 	}
+	b.deliverDiscordFinal(channelID, final)
 }
 
-func (b *DiscordBot) deliverDiscordFinal(channelID, previewID, final string) {
-	chunks := splitDiscordText(final)
-	allSent := true
+func (b *DiscordBot) deliverDiscordFinal(channelID, final string) {
 	firstID := ""
-	for _, chunk := range chunks {
+	for _, chunk := range splitDiscordText(final) {
 		replyTo := ""
 		if firstID != "" {
 			replyTo = firstID
 		}
 		message, err := b.api.SendMessage(b.ctx, DiscordSend{ChannelID: channelID, Content: chunk, ReplyTo: replyTo, AllowedMentions: noDiscordMentions()})
 		if err != nil {
-			allSent = false
+			log.Printf("discord: send final channel %s: %v", channelID, err)
 			continue
 		}
 		if firstID == "" {
 			firstID = message.ID
 		}
 	}
-	if allSent {
-		if previewID != "" {
-			if err := b.api.DeleteMessage(b.ctx, channelID, previewID); err != nil {
-				log.Printf("discord: delete preview channel %s: %v", channelID, err)
-			}
-		}
-		return
-	}
-	if previewID != "" {
-		_ = b.editChannelMessage(b.ctx, channelID, previewID, chunks[0])
-	}
-}
-
-func (b *DiscordBot) editChannelMessage(ctx context.Context, channelID, messageID, content string) error {
-	return b.api.EditMessage(ctx, DiscordEdit{ChannelID: channelID, MessageID: messageID, Content: content, AllowedMentions: noDiscordMentions()})
 }
 
 func (b *DiscordBot) sendChannelText(ctx context.Context, channelID, text string) {
@@ -741,81 +661,25 @@ func (b *DiscordBot) streamInteraction(interaction DiscordInteraction, sub *turn
 		return
 	}
 	defer sub.Close()
-	var text strings.Builder
-	dirty := false
-	ticker := time.NewTicker(b.editInterval)
-	defer ticker.Stop()
-	var idle *time.Timer
-	var idleC <-chan time.Time
-	if b.idleTimeout > 0 {
-		idle = time.NewTimer(b.idleTimeout)
-		defer idle.Stop()
-		idleC = idle.C
-	}
-	resetIdle := func() {
-		if idle == nil {
-			return
-		}
-		if !idle.Stop() {
-			select {
-			case <-idle.C:
-			default:
-			}
-		}
-		idle.Reset(b.idleTimeout)
-	}
-	for {
-		select {
-		case <-b.ctx.Done():
-			return
-		case <-idleC:
-			b.editInteractionText(interaction, "⚠️ response ended before completion")
-			return
-		case <-ticker.C:
-			if dirty {
-				_ = b.api.EditInteractionResponse(b.ctx, interaction, DiscordEdit{ChannelID: interaction.ChannelID, Content: firstDiscordChunk(text.String()), AllowedMentions: noDiscordMentions()})
-				dirty = false
-			}
-		case event, ok := <-sub.Events:
-			if !ok {
-				final, finalOK := <-sub.FinalText
-				if !finalOK {
-					b.editInteractionText(interaction, "⚠️ response ended before completion")
-					return
-				}
-				b.editInteractionText(interaction, final)
-				return
-			}
-			resetIdle()
-			if event.Type == rpc.EventMessageUpdate {
-				if delta, ok := decodeTextDelta(event.Raw); ok && delta != "" {
-					text.WriteString(delta)
-					dirty = true
-				}
-			}
-			if event.Type == rpc.EventAgentEnd {
-				outcome, err := rpc.DecodeAgentEndOutcome(event.Raw)
-				if err == nil && outcome.WillRetry {
-					continue
-				}
-				final, finalOK := <-sub.FinalText
-				if !finalOK {
-					b.editInteractionText(interaction, "⚠️ response ended before completion")
-					return
-				}
-				b.editInteractionText(interaction, final)
-				return
-			}
-		}
-	}
-}
 
-func firstDiscordChunk(text string) string {
-	chunks := splitDiscordText(text)
-	if len(chunks) == 0 {
-		return ""
+	reply, err := awaitBufferedReply(b.ctx, sub, b.idleTimeout)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		if errors.Is(err, errBufferedReplyIdle) {
+			log.Printf("discord: interaction turn idle for %s in channel %s", b.idleTimeout, interaction.ChannelID)
+		}
+		b.editInteractionText(interaction, "⚠️ response ended before completion")
+		return
 	}
-	return chunks[0]
+	if reply.Suppressed {
+		if err := b.api.DeleteInteractionResponse(b.ctx, interaction); err != nil {
+			log.Printf("discord: delete suppressed interaction response %s: %v", interaction.ID, err)
+		}
+		return
+	}
+	b.editInteractionText(interaction, reply.Text)
 }
 
 // splitDiscordText counts UTF-16 code units conservatively, so non-BMP runes

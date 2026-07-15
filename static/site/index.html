@@ -207,7 +207,7 @@
       position: sticky;
       bottom: 0;
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: auto 1fr auto;
       gap: .7rem;
       padding: .9rem 1rem 1rem;
       background: color-mix(in srgb, var(--bg) 94%, transparent);
@@ -230,6 +230,38 @@
       color: var(--ink);
       resize: none;
     }
+    .attach-button { align-self: stretch; min-width: 3rem; font-size: 1.2rem; }
+    .attachment-list {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: .45rem;
+    }
+    .attachment-list:empty { display: none; }
+    .attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      max-width: 100%;
+      padding: .35rem .5rem;
+      border: 1px solid var(--line);
+      border-radius: .25rem;
+      background: #fff;
+    }
+    .attachment-chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .attachment-chip button { border: 0; padding: 0 .15rem; color: var(--danger); }
+    .bubble-attachments { display: grid; gap: .65rem; margin-top: .75rem; }
+    .bubble-attachments:empty { display: none; }
+    .attachment-card {
+      display: grid;
+      gap: .45rem;
+      padding: .7rem;
+      border: 1px solid var(--line);
+      border-radius: .25rem;
+      background: #f6fbfd;
+    }
+    .attachment-card img { display: block; max-width: min(100%, 32rem); max-height: 24rem; object-fit: contain; }
+    .attachment-card a { color: var(--accent); font-weight: 600; overflow-wrap: anywhere; }
 
     .group-title {
       margin: .7rem 0 .45rem;
@@ -301,6 +333,9 @@
         <div id="messages" class="messages"></div>
 
         <form id="composer" class="composer">
+          <input id="fileInput" type="file" multiple hidden>
+          <div id="attachmentList" class="attachment-list" aria-live="polite"></div>
+          <button id="attach" class="attach-button" type="button" title="Attach files" aria-label="Attach files">📎</button>
           <textarea id="input" placeholder="Message wall-e…" rows="2"></textarea>
           <button id="send" class="primary" type="submit" title="Send" aria-label="Send">➤</button>
         </form>
@@ -339,6 +374,9 @@ const els = {
   messages: document.getElementById('messages'),
   composer: document.getElementById('composer'),
   input: document.getElementById('input'),
+  fileInput: document.getElementById('fileInput'),
+  attachmentList: document.getElementById('attachmentList'),
+  attach: document.getElementById('attach'),
   send: document.getElementById('send'),
   historyStatus: document.getElementById('historyStatus'),
   historyList: document.getElementById('historyList'),
@@ -347,6 +385,7 @@ const els = {
 let channel = localStorage.getItem('walle.channel') || randomPair();
 let bearerToken = localStorage.getItem('walle.token') || '';
 let busy = false;
+let pendingFiles = [];
 let sessionByHTTPChannel = new Map();
 let conversationLoadSeq = 0;
 const knownHTTPChannels = new Set(JSON.parse(localStorage.getItem('walle.knownHTTPChannels') || '[]'));
@@ -403,6 +442,7 @@ function setBusy(v) {
   busy = v;
   els.send.disabled = v;
   els.input.disabled = v;
+  els.attach.disabled = v;
   els.send.textContent = v ? '…' : '➤';
 }
 
@@ -435,7 +475,8 @@ function addBubble(role, text = '', pending = false) {
   const bubble = document.createElement('div');
   bubble.className = `bubble ${roleClass(role)}${pending ? ' pending' : ''}`;
   bubble.dataset.raw = text;
-  bubble.innerHTML = `<span class="who">${escapeHtml(roleLabel(role))}</span><div class="content"></div>`;
+  bubble.dataset.attachmentCount = '0';
+  bubble.innerHTML = `<span class="who">${escapeHtml(roleLabel(role))}</span><div class="content"></div><div class="bubble-attachments"></div>`;
   renderBubble(bubble);
   els.messages.appendChild(bubble);
   scrollMessagesToBottom();
@@ -452,6 +493,97 @@ function bubbleText(bubble) {
   return bubble.dataset.raw || '';
 }
 
+function bubbleHasAttachments(bubble) {
+  return Number(bubble.dataset.attachmentCount || 0) > 0;
+}
+
+function appendDirectMessage(bubble, text) {
+  const card = document.createElement('div');
+  card.className = 'attachment-card';
+  card.innerHTML = renderMarkdown(text);
+  bubble.querySelector('.bubble-attachments').appendChild(card);
+  bubble.dataset.attachmentCount = String(Number(bubble.dataset.attachmentCount || 0) + 1);
+  scrollMessagesToBottom();
+}
+
+function appendAttachment(bubble, payload) {
+  const binary = atob(payload.data || '');
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: payload.mimeType || 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const card = document.createElement('div');
+  card.className = 'attachment-card';
+  if ((payload.mimeType || '').startsWith('image/')) {
+    const image = document.createElement('img');
+    image.src = url;
+    image.alt = payload.caption || payload.fileName || 'Attached image';
+    card.appendChild(image);
+  }
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = payload.fileName || 'attachment';
+  link.textContent = `Download ${payload.fileName || 'attachment'}`;
+  card.appendChild(link);
+  if (payload.caption) {
+    const caption = document.createElement('div');
+    caption.className = 'small muted';
+    caption.textContent = payload.caption;
+    card.appendChild(caption);
+  }
+  bubble.querySelector('.bubble-attachments').appendChild(card);
+  bubble.dataset.attachmentCount = String(Number(bubble.dataset.attachmentCount || 0) + 1);
+  scrollMessagesToBottom();
+}
+
+function renderPendingFiles() {
+  els.attachmentList.innerHTML = '';
+  pendingFiles.forEach((file, index) => {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip small';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = `${file.name} (${formatBytes(file.size)})`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.title = `Remove ${file.name}`;
+    remove.setAttribute('aria-label', `Remove ${file.name}`);
+    remove.textContent = '×';
+    remove.addEventListener('click', () => {
+      pendingFiles.splice(index, 1);
+      renderPendingFiles();
+    });
+    chip.append(name, remove);
+    els.attachmentList.appendChild(chip);
+  });
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+async function encodeAttachments(files) {
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total > 5 * 1024 * 1024) throw new Error('Attachments are too large (5 MiB combined limit).');
+  return Promise.all(files.map(async file => ({
+    fileName: file.name,
+    mimeType: file.type || 'application/octet-stream',
+    data: arrayBufferToBase64(await file.arrayBuffer()),
+  })));
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 function promptForToken() {
   const token = window.prompt('Bearer token required:', bearerToken || '');
   if (token === null) return null;
@@ -460,39 +592,52 @@ function promptForToken() {
   return bearerToken;
 }
 
-async function postPrompt(message, allowTokenPrompt) {
+async function postPrompt(message, attachments, allowTokenPrompt) {
   const headers = { 'Content-Type': 'application/json' };
   if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+  const body = { channelType: 'http', channel, message };
+  if (attachments.length) body.attachments = attachments;
   const res = await fetch('/v1/prompt', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ channelType: 'http', channel, message }),
+    body: JSON.stringify(body),
   });
   if (res.status === 401 && allowTokenPrompt) {
     if (promptForToken() === null) return res;
-    return postPrompt(message, false);
+    return postPrompt(message, attachments, false);
   }
   return res;
 }
 
-async function sendMessage(message) {
+async function sendMessage(message, files = []) {
   conversationLoadSeq++; // invalidate any in-flight transcript load before streaming into live DOM nodes
   setBusy(true);
-  addBubble('user', message);
+  const fileSummary = files.map(file => `📎 ${file.name}`).join('\n');
+  addBubble('user', [message, fileSummary].filter(Boolean).join('\n\n'));
   const reply = addBubble('assistant', '', true);
   try {
-    const res = await postPrompt(message, true);
+    const attachments = await encodeAttachments(files);
+    const res = await postPrompt(message, attachments, true);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}\n${await res.text()}`);
     await readSSE(res, (event, data) => {
       if (event === 'delta') {
         const payload = JSON.parse(data || '{}');
         appendBubbleText(reply, payload.text || '');
+      } else if (event === 'message') {
+        const payload = JSON.parse(data || '{}');
+        appendDirectMessage(reply, payload.text || '');
+      } else if (event === 'attachment') {
+        appendAttachment(reply, JSON.parse(data || '{}'));
       } else if (event === 'error') {
         const payload = JSON.parse(data || '{}');
         throw new Error(payload.message || 'stream error');
       }
     });
-    if (!bubbleText(reply)) appendBubbleText(reply, '(no text response)');
+    if (bubbleHasAttachments(reply) && bubbleText(reply).trim() === 'NO_REPLY') {
+      reply.dataset.raw = '';
+      renderBubble(reply);
+    }
+    if (!bubbleText(reply) && !bubbleHasAttachments(reply)) appendBubbleText(reply, '(no response)');
   } catch (err) {
     appendBubbleText(reply, `${bubbleText(reply) ? '\n\n' : ''}⚠️ ${err.message || err}`);
     reply.classList.add('error');
@@ -643,12 +788,23 @@ function resetChatEmpty(message = '') {
   els.messages.innerHTML = message ? `<p class="empty">${escapeHtml(message)}</p>` : '';
 }
 
+els.attach.addEventListener('click', () => els.fileInput.click());
+
+els.fileInput.addEventListener('change', () => {
+  pendingFiles.push(...els.fileInput.files);
+  els.fileInput.value = '';
+  renderPendingFiles();
+});
+
 els.composer.addEventListener('submit', ev => {
   ev.preventDefault();
   const message = els.input.value.trim();
-  if (!message || busy) return;
+  if ((!message && !pendingFiles.length) || busy) return;
+  const files = pendingFiles;
+  pendingFiles = [];
   els.input.value = '';
-  sendMessage(message);
+  renderPendingFiles();
+  sendMessage(message, files);
 });
 
 els.input.addEventListener('keydown', ev => {

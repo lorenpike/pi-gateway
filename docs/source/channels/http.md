@@ -41,12 +41,22 @@ No auth. Exports the selected session via pi's `export_html` RPC command into a 
 Bearer auth (`WALLE_TOKEN`). Body:
 
 ```json
-{"channelType": "http", "channel": "smoke", "message": "say hi"}
+{
+  "channelType": "http",
+  "channel": "smoke",
+  "message": "describe this image",
+  "attachments": [{
+    "fileName": "photo.jpg",
+    "mimeType": "image/jpeg",
+    "data": "<base64 data>"
+  }]
+}
 ```
 
 - `channelType` (required) — the delivery adapter/type, for example `http` or `telegram` when Telegram is enabled.
 - `channel` (required) — the stable id within that channel type. For `http`, pick anything stable per conversation. For `telegram`, use the Telegram chat id.
-- `message` (required) — the user prompt text.
+- `message` — the user prompt text; it may be empty when at least one attachment is present.
+- `attachments` — optional inbound files with a name, optional MIME type, and standard base64 data. They are saved under the session media directory and linked into the agent prompt.
 
 Once the prompt is accepted it returns `200` with `Content-Type: text/event-stream` and streams the turn as SSE until the terminal `agent_end`, then a `done` event. Provider failures after acceptance are returned as a terminal SSE `error` event. Non-terminal `agent_end` events produced before an automatic retry are kept internal. The target delivery adapter may also deliver the assistant response externally; for example `channelType: "telegram"` sends the assistant response to that Telegram chat while still streaming the same response to the HTTP caller. These subscribers deliberately have different presentation policies: HTTP preserves every text delta, while a buffered external channel may suppress its own delivery when the authoritative final response is exactly `NO_REPLY`.
 
@@ -59,6 +69,9 @@ data: {}
 event: delta
 data: {"text":"Hello"}
 
+event: attachment
+data: {"fileName":"report.pdf","mimeType":"application/pdf","data":"<base64 data>","caption":"Requested report"}
+
 event: delta
 data: {"text":" world"}
 
@@ -70,10 +83,32 @@ data: {}
 ```
 
 - `agent_start` — the agent turn began.
-- `delta` — an incremental assistant text chunk (`message_update` with `assistantMessageEvent.type == "text_delta"`). Concatenate the `data.text` values for the full message. Other delta types (thinking, tool calls) are ignored in v1.
+- `delta` — an incremental assistant text chunk (`message_update` with `assistantMessageEvent.type == "text_delta"`). Concatenate the `data.text` values for the full message. Other pi delta types (thinking, tool calls) are ignored in v1.
+- `message` — text delivered directly to this active HTTP channel through `/v1/send`; it is separate from assistant deltas.
+- `attachment` — a file delivered directly through `/v1/send`, containing `fileName`, `mimeType`, base64 `data`, and an optional `caption`. HTTP media is limited to 32 MiB before base64 encoding.
 - `agent_end` — the turn finished.
 - `done` — terminal; the stream closes.
 - `error` — `data: {"message":"..."}` — terminal provider/API failures and streams that end unexpectedly are surfaced here, then the stream closes without `done`.
+
+### `POST /v1/send`
+
+Bearer auth. Delivers text or one local media file into an active HTTP prompt
+stream without creating another agent turn. This is how an agent can use
+`wall-e send` to return a generated file to an HTTP caller:
+
+```json
+{
+  "channelType": "http",
+  "channel": "smoke",
+  "mediaPath": "/home/wall-e/report.pdf",
+  "caption": "Requested report"
+}
+```
+
+The matching `/v1/prompt` stream receives an `attachment` event with base64
+file data. Direct text uses `text` instead of `mediaPath` and produces a
+`message` event. A send to an HTTP channel with no active prompt receiver
+returns `409`; media paths must be absolute, clean paths to regular local files.
 
 ## Auth
 

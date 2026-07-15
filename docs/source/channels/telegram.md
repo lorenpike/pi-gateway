@@ -65,7 +65,7 @@ For each incoming text or attachment message:
 3. Assistant Markdown is rendered through Telegram's `HTML` parse mode using a conservative stdlib converter (bold/italic/code blocks/links/headings/lists; unsupported Markdown remains escaped plain text).
 4. On `agent_end`, send the **full concatenated response**. If it exceeds Telegram's 4096-char limit, split it on rune boundaries and send later chunks as replies to the first chunk so multi-byte text stays valid UTF-8.
 
-Telegram is a buffered client-facing channel. The planned shared buffered-channel control will treat a complete response whose trimmed text is exactly `NO_REPLY` as silent completion: the typing indicator stops and no Telegram message is sent. Whole-response, case-sensitive matching prevents accidental suppression when the token appears in normal prose. This behavior is specified in [`impl/20260714--no-reply.md`](https://github.com/lorenpike/pi-gateway/blob/main/impl/20260714--no-reply.md) but is not implemented yet.
+Telegram is a buffered client-facing channel. A complete response whose trimmed text is exactly `NO_REPLY` is treated as silent completion: the typing indicator stops and no Telegram message is sent. Whole-response, case-sensitive matching prevents accidental suppression when the token appears in normal prose. This behavior is specified in [`impl/20260714--no-reply.md`](https://github.com/lorenpike/pi-gateway/blob/main/impl/20260714--no-reply.md).
 
 Photos, documents, voice notes, audio, and videos are downloaded through the
 Bot API and stored under `${WALLE_SESSION_DIR}/media` before the turn starts.

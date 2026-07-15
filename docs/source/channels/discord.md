@@ -271,19 +271,13 @@ prompt. Downloads are HTTPS-only CDN requests with a 30-second timeout and a
 32 MiB inbound safety cap; the bot Authorization header is never sent to
 attachment URLs.
 
-While pi is working, wall-e refreshes Discord's typing indicator. The current
-implementation creates a temporary preview from assistant deltas, coalesces
-later deltas into throttled edits, and replaces that preview with authoritative
-final messages at completion.
-
-Discord is intended to use the same **buffered client-facing** contract as
-Telegram. The planned change removes ordinary-message previews and waits for
-the authoritative final text. A complete response whose trimmed text is exactly
-`NO_REPLY` will stop the typing indicator and send no Discord message; all other
-responses will be delivered only after completion. This whole-response,
-case-sensitive control is specified in
-[`impl/20260714--no-reply.md`](https://github.com/lorenpike/pi-gateway/blob/main/impl/20260714--no-reply.md) and is not
-implemented yet.
+While pi is working, wall-e refreshes Discord's typing indicator. Discord uses
+the same **buffered client-facing** contract as Telegram: assistant deltas are
+not delivered or used to create previews, and the authoritative final text is
+sent only after completion. A complete response whose trimmed text is exactly
+`NO_REPLY` stops the typing indicator and sends no Discord message. This
+whole-response, case-sensitive control is specified in
+[`impl/20260714--no-reply.md`](https://github.com/lorenpike/pi-gateway/blob/main/impl/20260714--no-reply.md).
 
 Discord Markdown is preserved. Responses longer than 2,000 characters are
 split without corrupting emoji or losing whitespace, with later chunks replying
@@ -298,12 +292,11 @@ Wall-e globally synchronizes these native commands after Gateway Ready:
 Discovered pi extensions and prompt templates receive deterministic sanitized
 aliases; skills are selected through `/skill name [args]`.
 
-Allowed command interactions are deferred before pool or RPC work. The current
-implementation streams a pi command through the deferred original response and
-uses follow-ups for additional chunks. Under the planned buffered contract, the
-deferred response will not receive assistant deltas; normal final text will be
-written after completion, while `NO_REPLY` will delete the deferred original
-response so no persistent assistant message remains. Discord's required initial
+Allowed command interactions are deferred before pool or RPC work. The
+deferred response does not receive assistant deltas; normal final text is
+written after completion and uses follow-ups for additional chunks, while
+`NO_REPLY` deletes the deferred original response so no persistent assistant
+message remains. Discord's required initial
 acknowledgement means its temporary “thinking” state cannot be avoided. A pi
 command applied during an active turn uses pi's prompt-steer behavior and
 receives a short acknowledgement while the existing channel stream remains
