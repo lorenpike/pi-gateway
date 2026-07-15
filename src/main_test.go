@@ -29,6 +29,7 @@ import (
 	"wall-e/httpapi"
 	"wall-e/pool"
 	"wall-e/turn"
+	"wall-e/version"
 )
 
 // localhostAddr returns a loopback-only listen address for tests. Binding the
@@ -97,6 +98,25 @@ func TestCLI_HelpDoesNotRequireConfig(t *testing.T) {
 	}
 	if errOut.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", errOut.String())
+	}
+}
+
+func TestCLI_VersionDoesNotRequireConfig(t *testing.T) {
+	clearWalleEnv(t)
+	for _, flag := range []string{"--version", "-V"} {
+		t.Run(flag, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := mainWithArgs([]string{flag}, strings.NewReader(""), &out, &errOut)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if want := "wall-e " + version.String() + "\n"; out.String() != want {
+				t.Fatalf("stdout = %q, want %q", out.String(), want)
+			}
+			if errOut.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", errOut.String())
+			}
+		})
 	}
 }
 

@@ -277,7 +277,7 @@ not delivered or used to create previews, and the authoritative final text is
 sent only after completion. A complete response whose trimmed text is exactly
 `NO_REPLY` stops the typing indicator and sends no Discord message. This
 whole-response, case-sensitive control is specified in
-[`impl/20260714--no-reply.md`](https://github.com/lorenpike/pi-gateway/blob/main/impl/20260714--no-reply.md).
+[`impl/20260714--no-reply.md`](https://github.com/millie-research-inc/wall-e/blob/main/impl/20260714--no-reply.md).
 
 Discord Markdown is preserved. Responses longer than 2,000 characters are
 split without corrupting emoji or losing whitespace, with later chunks replying

@@ -3,6 +3,8 @@ from pathlib import Path
 project = "wall-e"
 author = "Metrized"
 root = Path(__file__).resolve().parent
+release = (root.parents[1] / "src" / "version" / "VERSION").read_text().strip()
+version = release
 
 extensions = [
     "myst_parser",

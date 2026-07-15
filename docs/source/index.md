@@ -2,6 +2,8 @@
 
 `wall-e` is a single Go binary that runs inside an Ubuntu container and exposes a small HTTP API plus Telegram and Discord front-ends, each fronting a **fixed pool of `pi --mode rpc` child processes**. The gateway translates between chat-platform events and pi's JSONL RPC protocol.
 
+**Version:** {sub-ref}`release`
+
 ```{toctree}
 :maxdepth: 2
 :caption: Configuration
@@ -14,6 +16,13 @@ environment
 :caption: Channels
 
 channels/index
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Operations
+
+deployment
 ```
 
 ```{toctree}
@@ -33,6 +42,13 @@ at
 cron
 ```
 
+```{toctree}
+:maxdepth: 1
+:caption: Development
+
+release
+```
+
 ## At a glance
 
 - **One live `pi` process per active chat.** A bounded pool (`WALLE_POOL_SIZE`, default 4) binds at most one process to any active channel; per-channel serialization is enforced **in the pool**, not in each front-end.
@@ -48,7 +64,7 @@ make docker            # build + run the gateway container (tini PID 1 -> superv
 make stop              # docker stop (graceful drain within WALLE_DRAIN_TIMEOUT)
 ```
 
-See [Environment variables](environment) for gateway, CLI, credential, container, and benchmark configuration. Front-end-specific setup lives under [Channels](channels/index). To connect email, calendars, source control, messaging, and other services, see [Composio](composio).
+See [Deployment and updates](deployment) to install, update, back up, or move a customer container. [Environment variables](environment) covers gateway, CLI, credential, container, and benchmark configuration. Front-end-specific setup lives under [Channels](channels/index). To connect email, calendars, source control, messaging, and other services, see [Composio](composio).
 
 ## Source layout
 

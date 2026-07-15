@@ -101,6 +101,19 @@ LC_ALL=C.UTF-8
 The UTF-8 locale settings are required for reliable Unicode input and output;
 `COLORTERM` controls color support rather than character encoding.
 
+### Deployment helper variables
+
+These variables configure the host-side scripts and are not gateway settings:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WALLE_HOME_VOLUME` | `walle--home` | Named Docker volume used by deploy, backup, and restore commands. Set it when testing or selecting a restored customer volume. |
+| `WALLE_CONTAINER` | `wall-e` | Container name used by deployment and backup scripts. |
+| `FORCE_RESTORE` | `0` | Set to `1` only to erase a selected non-empty restore destination before extraction. |
+
+See [Deployment and updates](deployment) before changing these values or moving
+a customer installation.
+
 Cron jobs do not inherit the full container or pi-worker environment. See
 [Cron jobs](cron) for the recommended job environment and private env-file
 pattern.
@@ -126,6 +139,7 @@ be placed in `.env`.
 | `CGO_ENABLED` | `0` | Builds a static gateway binary without cgo. |
 | `GOOS` | `linux` | Targets the container operating system. |
 | `COMPOSIO_INSTALL_DIR` | `/opt/composio` | Selects the installation directory while the image installs [Composio](composio). It is not a runtime variable. |
+| `COMPOSIO_VERSION` | `@composio/cli@0.2.32` | Pins the Composio CLI release used by the Docker build. It is not a runtime variable. |
 | `CC` | `x86_64-w64-mingw32-gcc` | Selected by `make test` only when `RACE=1` on Windows. |
 
 ## Environment inheritance and secrets

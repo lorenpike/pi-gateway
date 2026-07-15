@@ -1,7 +1,7 @@
 FROM golang:1.26 AS build
 # Static binary; no cgo and no platform libc tie-in.
 COPY src/ src/
-RUN CGO_ENABLED=0 GOOS=linux cd src && go build -trimpath -o /usr/local/bin/wall-e .
+RUN cd src && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /usr/local/bin/wall-e .
 
 FROM ubuntu:24.04
 
@@ -114,6 +114,13 @@ COPY --chown=wall-e:wall-e --chmod=555 static/site/ /opt/wall-e/www/
 COPY --chown=root:root --chmod=755 docs/build/html /usr/share/wall-e/docs
 
 RUN ln -s /home/wall-e/.vimrc /home/wall-e/.config/nvim/init.vim
+
+ARG WALLE_VERSION \
+    VCS_REF
+LABEL org.opencontainers.image.title="wall-e" \
+      org.opencontainers.image.version="$WALLE_VERSION" \
+      org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.source="https://github.com/millie-research-inc/wall-e"
 
 ENV HOME=/home/wall-e
 ENV WALLE_SESSION_DIR=/home/wall-e/sessions

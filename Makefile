@@ -16,15 +16,30 @@ BUILD := build
 IMAGE := wall-e
 STATIC_FILES := $(shell find static -type f)
 SRC_FILES := $(shell find src -type f)
-DOCKER_DEPS := $(STATIC_FILES) Dockerfile $(BUILD)/pi-settings.json $(SRC_FILES) $(DOCS)/build/html/index.html
 HOME := $(or $(HOME),$(USERPROFILE))
+
+VERSION_FILE := src/version/VERSION
+VERSION := $(strip $(shell tr -d '\r\n' < $(VERSION_FILE)))
+REGISTRY := containers.metrized.com
+RELEASE_REPOSITORY := $(REGISTRY)/wall-e
+RELEASE_IMAGE := $(RELEASE_REPOSITORY):v$(VERSION)
+LATEST_IMAGE := $(RELEASE_REPOSITORY):latest
+
+GIT_REV := $(shell git rev-parse HEAD 2>/dev/null)
+GIT_REF := $(shell git symbolic-ref -q HEAD 2>/dev/null)
+GIT_REF_FILE := $(shell git rev-parse --git-path $(GIT_REF) 2>/dev/null)
 
 BOT := wall-e
 TMUX_SESSION := default
 AUTH_FILE := /opt/pi/auth.json
 SETTINGS_FILE := /opt/pi/settings.json
 WALLE_PORT ?= 6007
-MD_FILES := $(shell find $(DOCS)/source -name "*.md")
+
+DOCS_HOST := metrized_server_0@10.0.0.5
+DOCS_ROOT := C:/Metrized/metrized-files/files/private/docs/wall-e
+DOC_FILES := $(shell find $(DOCS)/source -type f)
+
+DOCKER_DEPS := $(STATIC_FILES) Dockerfile Makefile $(BUILD)/pi-settings.json $(SRC_FILES) $(DOCS)/build/html/index.html $(GIT_REF_FILE)
 
 # Optionally include environment variables
 -include .env
@@ -43,7 +58,7 @@ help:
 		| sort
 
 .PHONY: docker # Build and run container
-docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
+docker: $(BUILD)/.docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 	-@docker rm -f $(IMAGE) 2>/dev/null
 	# -e CLOUDFLARE_TOKEN
 	@docker run -d \
@@ -86,6 +101,22 @@ test:
 bench:
 	@cd benchmark && uv run walle-bench -j 6 -n 5 -v
 
+.PHONY: docs # Build and publish documentation
+docs: $(DOCS)/build/html/index.html
+	@echo 'Publishing documentation...'
+	@scp -r $(DOCS)/build/html/* $(DOCS_HOST):$(DOCS_ROOT)
+	@ssh $(DOCS_HOST) 'C:/cygwin64/bin/mkdir -p $(DOCS_ROOT)/v$(VERSION)' \
+		&& scp -r $(DOCS)/build/html/* $(DOCS_HOST):$(DOCS_ROOT)/v$(VERSION)
+	@echo 'Documentation published to https://files.metrized.com/private/docs/wall-e/'
+
+.PHONY: push # Publish the release image
+push: $(BUILD)/.docker-stamp
+	@$(MAKE) test
+	@$(MAKE) docs
+	@docker tag $(IMAGE) $(RELEASE_IMAGE) && docker push $(RELEASE_IMAGE)
+	@docker tag $(IMAGE) $(LATEST_IMAGE) && docker push $(LATEST_IMAGE)
+	@echo 'Published wall-e v$(VERSION)'
+
 .PHONY: clean # Clean build artifacts
 clean:
 	@echo 'Cleaning up...'
@@ -99,9 +130,12 @@ debug:
 
 # RECIPES
 # -------------------------------------
-$(BUILD)/docker-stamp: $(DOCKER_DEPS)
+$(BUILD)/.docker-stamp: $(DOCKER_DEPS)
 	@mkdir -p $(BUILD)
-	@docker build --progress=plain -t $(IMAGE) . 2>&1 | tee $@
+	@set -o pipefail; docker build --platform linux/amd64 --progress=plain \
+		--build-arg WALLE_VERSION=$(VERSION) \
+		--build-arg VCS_REF=$(GIT_REV) \
+		-t $(IMAGE) . 2>&1 | tee $@
 
 $(BUILD)/auth.json: scripts/codex-oauth.py
 	@mkdir -p $(BUILD)
@@ -111,5 +145,5 @@ $(BUILD)/pi-settings.json: $(HOME)/.pi/agent/settings.json
 	@mkdir -p $(BUILD)
 	@cat ~/.pi/agent/settings.json | jq '{ defaultProvider, defaultModel }' > $@
 
-$(DOCS)/build/html/index.html: $(MD_FILES)
-	@cd $(DOCS) && make clean html
+$(DOCS)/build/html/index.html: $(DOC_FILES) $(VERSION_FILE)
+	@cd $(DOCS) && make clean html SPHINX_OPTS='-W --keep-going'

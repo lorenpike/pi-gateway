@@ -39,6 +39,7 @@ import (
 	"wall-e/rpc"
 	"wall-e/session"
 	"wall-e/turn"
+	"wall-e/version"
 )
 
 func main() {
@@ -59,6 +60,10 @@ var newDiscordFrontend = func(cfg chat.DiscordConfig, p *pool.Pool) (discordFron
 }
 
 func mainWithArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 1 && (args[0] == "--version" || args[0] == "-V") {
+		fmt.Fprintf(stdout, "wall-e %s\n", version.String())
+		return 0
+	}
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		printUsage(stdout)
 		return 0
@@ -106,6 +111,7 @@ func printUsage(w io.Writer) {
   wall-e msg <type:id> [--file PATH ...]
   wall-e send <type:id> [text]
   wall-e send --media <type:id> <filepath> [--caption "..."]
+  wall-e --version | -V
   wall-e --help
 
 Commands:

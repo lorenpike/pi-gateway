@@ -71,6 +71,7 @@ The binary has explicit subcommands:
 
 ```sh
 wall-e run              # start the gateway server
+wall-e --version        # print the version (-V also works)
 wall-e --help           # print usage
 wall-e msg <type:id>    # read a prompt from stdin and submit it
 ```
@@ -100,18 +101,24 @@ The Docker image seeds `/opt/wall-e/SYSTEM.md`. Every spawned `pi --mode rpc`
 process receives `--system-prompt /opt/wall-e/SYSTEM.md`. `/opt/pi/APPEND_SYSTEM.md`
 is still loaded by pi as appended environment context.
 
-## Configuration
+## Deployment
 
-See the Sphinx [environment-variable documentation](docs/source/environment.md)
-for gateway, CLI, credential, container, and benchmark configuration. See
-[Composio](docs/source/composio.md) to connect email,
-calendars, source control, messaging, and other external services.
+Use the versioned image from `containers.metrized.com/wall-e` on another
+computer. The Sphinx [deployment documentation](docs/source/deployment.md)
+covers first run, upgrades, rollback, environment variables, and moving the
+persistent customer home volume with verified backup/restore scripts.
+
+See the [environment-variable documentation](docs/source/environment.md) for
+gateway, CLI, credential, container, and benchmark configuration. See
+[Composio](docs/source/composio.md) to connect email, calendars, source control,
+messaging, and other external services.
 
 ## Develop
 
 ```sh
 make test           # go vet + go test ./...
 RACE=1 make test    # with the race detector (uses MinGW gcc for cgo)
+make docs           # build and publish current docs
 make debug          # throwaway tmux container for manual `pi` TUI access
 ```
 

@@ -1,0 +1,32 @@
+name: On Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version and extract changelog
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python scripts/release.py "$version" > RELEASE.md
+
+      - name: Create release
+        uses: ncipollo/release-action@v1
+        with:
+          bodyFile: RELEASE.md
+          artifacts: scripts/deploy.sh,scripts/backup-home.sh,scripts/restore-home.sh
+          immutableCreate: true
