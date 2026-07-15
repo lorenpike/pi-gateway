@@ -53,6 +53,8 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 		-e WALLE_PORT \
 		-e WALLE_TELEGRAM_TOKEN \
 		-e WALLE_TELEGRAM_ALLOWED_CHATS \
+		-e WALLE_DISCORD_TOKEN \
+		-e WALLE_DISCORD_ALLOWED_CHANNELS \
 		-e OPENAI_API_KEY \
 		-e OPENROUTER_API_KEY \
 		-e BRAVE_API_KEY \

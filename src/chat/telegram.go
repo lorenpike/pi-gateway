@@ -2,13 +2,14 @@ package chat
 
 // telegram.go is the real TelegramAPI adapter: a thin shim over the Telegram
 // Bot API (https://api.telegram.org/bot<token>/<method>) using only net/http.
-// This keeps the gateway stdlib-only (no go-telegram-bot-api / telebot dep):
+// This keeps the Telegram transport stdlib-only (no go-telegram-bot-api /
+// telebot dependency):
 // the small set of methods wall-e needs (getMe, getUpdates, sendMessage,
 // sendChatAction, setMyCommands, and media operations) are straightforward.
 //
-// Tradeoff note (Phase 6 decision): hand-rolling preserves the module's
-// zero-third-party-dep invariant and the plan's "stdlib-only" framing, at the
-// cost of re-implementing request/response envelopes and (later) retry/backoff
+// Tradeoff note (Phase 6 decision): hand-rolling avoids another platform
+// dependency, at the cost of re-implementing request/response envelopes and
+// (later) retry/backoff
 // that a library would provide. For v1's four calls + long-poll getUpdates the
 // surface is small enough that hand-rolling is the lighter choice; revisit if we
 // need inline keyboards, file uploads, webhook handling, or sophisticated rate

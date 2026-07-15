@@ -64,6 +64,12 @@ wall-e msg http:morning-digest < ~/prompts/morning.md
 wall-e msg telegram:123456789 <<'EOF'
 Scheduled task: summarize today's calendar and top priorities.
 EOF
+
+wall-e msg discord:123456789012345678 <<'EOF'
+Scheduled task: summarize this Discord channel.
+EOF
+
+wall-e send discord:123456789012345678 "The report is ready."
 ```
 
 The Docker image seeds `/opt/wall-e/SYSTEM.md`. Every spawned `pi --mode rpc`
@@ -83,8 +89,10 @@ RACE=1 make test    # with the race detector (uses MinGW gcc for cgo)
 make debug          # throwaway tmux container for manual `pi` TUI access
 ```
 
-The Go module lives under `src/` (`module wall-e`, stdlib-only). Packages:
+The Go module lives under `src/` (`module wall-e`). It uses the pinned
+`discordgo` Gateway/REST client behind wall-e's own adapter interface; Telegram
+remains hand-rolled over `net/http`. Packages:
 `rpc/` (pi JSONL client), `session/` (channel→transcript map),
 `pool/` (bounded worker pool), `httpapi/` (`/health`, `/v1/prompt` SSE,
-static UI, session listing/export), `chat/` (Telegram front-end), `config/`
+static UI, session listing/export), `chat/` (Telegram and Discord front-ends), `config/`
 (env parsing), `main` (wiring).

@@ -1,6 +1,6 @@
 # wall-e gateway
 
-`wall-e` is a single Go binary that runs inside an Ubuntu container and exposes a small HTTP API plus chat-platform front-ends (Telegram, and later Discord), each fronting a **fixed pool of `pi --mode rpc` child processes**. The gateway translates between chat-platform events and pi's JSONL RPC protocol.
+`wall-e` is a single Go binary that runs inside an Ubuntu container and exposes a small HTTP API plus Telegram and Discord front-ends, each fronting a **fixed pool of `pi --mode rpc` child processes**. The gateway translates between chat-platform events and pi's JSONL RPC protocol.
 
 ```{toctree}
 :maxdepth: 2
@@ -29,10 +29,10 @@ cron
 ## At a glance
 
 - **One live `pi` process per active chat.** A bounded pool (`WALLE_POOL_SIZE`, default 4) binds at most one process to any active channel; per-channel serialization is enforced **in the pool**, not in each front-end.
-- **Channel identity is stable per platform** — Telegram chat id, HTTP client-chosen `channel` string, (later) Discord channel id — and maps to a pi session transcript file on disk.
+- **Channel identity is stable per platform** — Telegram chat id, Discord channel/thread id, or HTTP client-chosen `channel` string — and maps to a pi session transcript file on disk.
 - **Agents can discover the current channel** through `WALLE_CHANNEL=<type>:<id>`. Same-channel reuse stays warm; cross-channel slot reuse respawns `pi` so the env var is never stale.
 - **Mid-stream messages steer**, they do not queue a new turn: a second message from chat or HTTP/CLI for a channel with an in-flight turn is forwarded as pi's `steer` command, not a new `Acquire`.
-- **Stdlib-only Go.** The whole module (`module wall-e`, `go 1.26`) has zero third-party dependencies — even the Telegram Bot API is hand-rolled over `net/http`.
+- **Small transport boundary.** Telegram is hand-rolled over `net/http`; Discord uses pinned `discordgo` for Gateway recovery and REST rate-limit handling behind a wall-e-owned fakeable interface. The binary remains statically buildable with `CGO_ENABLED=0`.
 
 ## Running it
 
@@ -53,7 +53,7 @@ src/
 ├── pool/          bounded worker pool (acquire/drain/evict, per-channel ser.)
 ├── turn/          shared active-turn coordinator (prompt vs steer, subscribers)
 ├── httpapi/       /health + /v1/prompt SSE
-├── chat/          Telegram front-end (telegram.go is the net/http adapter)
+├── chat/          Telegram + Discord front-ends and transport seams
 └── config/        WALLE_* env parsing
 ```
 

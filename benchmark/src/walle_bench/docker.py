@@ -14,6 +14,7 @@ IMAGE = "wall-e"
 ENV = (
     "TZ",
     "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
     "BRAVE_API_KEY",
     "WALLE_PROVIDER",
     "WALLE_MODEL",

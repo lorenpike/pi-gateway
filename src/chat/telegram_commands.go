@@ -34,15 +34,13 @@ type telegramCommandRegistry struct {
 	registered  []BotCommand
 }
 
-var telegramNativeCommands = []telegramCommand{
-	{TelegramName: "skill", Source: "gateway", Description: "List skills or run /skill <name> [args]"},
-	{TelegramName: "name", Source: "gateway", Description: "Set or clear this pi session name"},
-	{TelegramName: "session", Source: "gateway", Description: "Show current pi session info"},
-	{TelegramName: "clone", Source: "gateway", Description: "Clone this pi session branch"},
-	{TelegramName: "new", Source: "gateway", Description: "Start a new pi session"},
-	{TelegramName: "compact", Source: "gateway", Description: "Compact this pi session context"},
-	{TelegramName: "abort", Source: "gateway", Description: "Abort the current pi response"},
-}
+var telegramNativeCommands = func() []telegramCommand {
+	out := make([]telegramCommand, 0, len(gatewayNativeCommands))
+	for _, command := range gatewayNativeCommands {
+		out = append(out, telegramCommand{TelegramName: command.Name, Source: "gateway", Description: command.Description})
+	}
+	return out
+}()
 
 func newTelegramCommandRegistry(commands []rpc.Command) *telegramCommandRegistry {
 	r := &telegramCommandRegistry{

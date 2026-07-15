@@ -71,13 +71,13 @@ type Config struct {
 	// nil, New installs a manager over the supplied pool.
 	Turns *turn.Manager
 	// PromptAdapters route typed /v1/prompt requests by channelType. New always
-	// installs/overwrites the "http" adapter. Chat front-ends such as Telegram
-	// register additional adapters from main.
+	// installs/overwrites the "http" adapter. Telegram and Discord register
+	// additional adapters from main.
 	PromptAdapters map[string]PromptAdapter
 	// MaxPromptBytes bounds JSON prompt request bodies. Defaults to 8 MiB.
 	MaxPromptBytes int64
-	// SendAdapters route typed /v1/send requests by channelType. Chat front-ends
-	// such as Telegram register their direct-delivery adapter from main.
+	// SendAdapters route typed /v1/send requests by channelType. Telegram and
+	// Discord register their direct-delivery adapters from main.
 	SendAdapters map[string]SendAdapter
 }
 

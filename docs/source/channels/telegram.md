@@ -58,14 +58,19 @@ For the bot to receive group messages:
 
 ## Reply behavior
 
-For each incoming text message:
+For each incoming text or attachment message:
 
 1. **Acquire** a slot for the chat (one live `pi` per Telegram chat).
 2. Show and periodically refresh Telegram's **typing** indicator while assistant text deltas are accumulated internally. No partial messages are sent.
 3. Assistant Markdown is rendered through Telegram's `HTML` parse mode using a conservative stdlib converter (bold/italic/code blocks/links/headings/lists; unsupported Markdown remains escaped plain text).
 4. On `agent_end`, send the **full concatenated response**. If it exceeds Telegram's 4096-char limit, split it on rune boundaries and send later chunks as replies to the first chunk so multi-byte text stays valid UTF-8.
 
-Non-text messages are ignored in v1.
+Photos, documents, voice notes, audio, and videos are downloaded through the
+Bot API and stored under `${WALLE_SESSION_DIR}/media` before the turn starts.
+Wall-e appends local Markdown file links to one prompt; Telegram media albums
+are coalesced briefly so their files remain in event order. Attachment-only
+messages are supported. The same adapter also powers `wall-e send telegram:<id>`
+for direct text, photo, and document delivery without creating a pi turn.
 
 ## Mid-stream messages steer
 

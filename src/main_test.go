@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,7 +24,11 @@ import (
 	"testing"
 	"time"
 
+	"wall-e/chat"
 	"wall-e/config"
+	"wall-e/httpapi"
+	"wall-e/pool"
+	"wall-e/turn"
 )
 
 // localhostAddr returns a loopback-only listen address for tests. Binding the
@@ -54,6 +59,7 @@ func clearWalleEnv(t *testing.T) {
 		"WALLE_POOL_SIZE", "WALLE_DRAIN_TIMEOUT", "WALLE_SESSION_DIR",
 		"WALLE_PROVIDER", "WALLE_MODEL",
 		"WALLE_TELEGRAM_TOKEN", "WALLE_TELEGRAM_ALLOWED_CHATS",
+		"WALLE_DISCORD_TOKEN", "WALLE_DISCORD_ALLOWED_CHANNELS",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -134,6 +140,44 @@ func TestCLI_MsgPostsTypedPromptAndStreamsDeltas(t *testing.T) {
 	}
 }
 
+func TestCLI_DiscordTypedPromptAndSend(t *testing.T) {
+	clearWalleEnv(t)
+	t.Setenv("WALLE_TOKEN", "sekret")
+	var gotPrompt cliPromptRequest
+	var gotSend cliSendRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/prompt":
+			_ = json.NewDecoder(request.Body).Decode(&gotPrompt)
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: delta\ndata: {\"text\":\"ok\"}\n\nevent: done\ndata: {}\n\n")
+		case "/v1/send":
+			_ = json.NewDecoder(request.Body).Decode(&gotSend)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"ok":true,"channel":"discord:123"}`)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("WALLE_PORT", fmt.Sprintf("%d", server.Listener.Addr().(*net.TCPAddr).Port))
+
+	var promptOut bytes.Buffer
+	if code := mainWithArgs([]string{"msg", "discord:123"}, strings.NewReader("prompt"), &promptOut, io.Discard); code != 0 {
+		t.Fatalf("msg exit=%d", code)
+	}
+	if gotPrompt.ChannelType != "discord" || gotPrompt.Channel != "123" || promptOut.String() != "ok" {
+		t.Fatalf("prompt=%+v output=%q", gotPrompt, promptOut.String())
+	}
+	var sendOut bytes.Buffer
+	if code := mainWithArgs([]string{"send", "discord:123", "hello"}, strings.NewReader(""), &sendOut, io.Discard); code != 0 {
+		t.Fatalf("send exit=%d output=%s", code, sendOut.String())
+	}
+	if gotSend.ChannelType != "discord" || gotSend.Channel != "123" || gotSend.Text != "hello" {
+		t.Fatalf("send=%+v", gotSend)
+	}
+}
+
 func TestCLI_MsgRejectsBadInput(t *testing.T) {
 	clearWalleEnv(t)
 	var out, errOut bytes.Buffer
@@ -174,6 +218,91 @@ func TestCLI_MsgStreamErrorAndEarlyCloseFail(t *testing.T) {
 	t.Setenv("WALLE_PORT", fmt.Sprintf("%d", srvClose.Listener.Addr().(*net.TCPAddr).Port))
 	if code := mainWithArgs([]string{"msg", "http:c1"}, strings.NewReader("hi"), io.Discard, io.Discard); code == 0 {
 		t.Fatal("early close exit code = 0")
+	}
+}
+
+type fakeMainDiscord struct {
+	started chan struct{}
+	stopped chan struct{}
+	sends   chan httpapi.SendRequest
+}
+
+func (f *fakeMainDiscord) Start(context.Context) error { close(f.started); return nil }
+func (f *fakeMainDiscord) Stop(context.Context) error  { close(f.stopped); return nil }
+func (f *fakeMainDiscord) Prompt(context.Context, string, string) (*turn.Subscription, error) {
+	return nil, errors.New("not used")
+}
+func (f *fakeMainDiscord) Send(_ context.Context, req httpapi.SendRequest) (httpapi.SendResult, error) {
+	f.sends <- req
+	return httpapi.SendResult{Sent: []httpapi.SentItem{{Type: "text", Text: req.Text}}}, nil
+}
+
+func TestRun_WiresDiscordSendAdapterAndLifecycle(t *testing.T) {
+	clearWalleEnv(t)
+	port := freePort(t)
+	t.Setenv("WALLE_TOKEN", "test-token")
+	t.Setenv("WALLE_PORT", fmt.Sprintf("%d", port))
+	t.Setenv("WALLE_SESSION_DIR", t.TempDir())
+	t.Setenv("WALLE_DRAIN_TIMEOUT", "1s")
+	t.Setenv("WALLE_DISCORD_TOKEN", "never-used-by-fake")
+
+	fake := &fakeMainDiscord{started: make(chan struct{}), stopped: make(chan struct{}), sends: make(chan httpapi.SendRequest, 1)}
+	oldConstructor := newDiscordFrontend
+	newDiscordFrontend = func(cfg chat.DiscordConfig, _ *pool.Pool) (discordFrontend, error) {
+		if cfg.Token == "" || cfg.Turns == nil || cfg.MediaStore == nil {
+			t.Fatalf("Discord config not wired: %+v", cfg)
+		}
+		return fake, nil
+	}
+	t.Cleanup(func() { newDiscordFrontend = oldConstructor })
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.HTTP.Addr = localhostAddr(port)
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, cfg) }()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("Discord frontend did not start")
+	}
+	if !healthOK(t, localhostAddr(port)) {
+		cancel()
+		t.Fatal("gateway not healthy")
+	}
+	body := strings.NewReader(`{"channelType":"discord","channel":"123","text":"hello"}`)
+	req, _ := http.NewRequest(http.MethodPost, "http://"+localhostAddr(port)+"/v1/send", body)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		cancel()
+		t.Fatalf("send status=%d", resp.StatusCode)
+	}
+	select {
+	case got := <-fake.sends:
+		if got.Channel != "123" || got.Text != "hello" {
+			t.Fatalf("send=%+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Discord send adapter not called")
+	}
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fake.stopped:
+	default:
+		t.Fatal("Discord frontend was not stopped")
 	}
 }
 

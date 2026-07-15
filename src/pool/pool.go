@@ -599,8 +599,12 @@ func (p *Pool) Shutdown(ctx context.Context) error {
 // the slot's buffered events channel for the active Slot consumer. The
 // goroutine exits when the client's Events channel closes (process exit).
 func (p *Pool) startForwarder(s *slot) {
+	// Capture the client before launching. A cross-channel respawn replaces
+	// s.client while the old forwarder may still be exiting; reading the field
+	// inside the goroutine races with that replacement.
+	client := s.client
 	go func() {
-		ch := s.client.Events()
+		ch := client.Events()
 		for {
 			ev, ok := <-ch
 			if !ok {

@@ -1,6 +1,6 @@
 // Package media stores inbound channel attachments as local files and formats
 // file-first prompts for pi. It is deliberately channel-neutral: HTTP,
-// Telegram, and future adapters save bytes here, then submit normal text links.
+// Telegram, and Discord adapters save bytes here, then submit normal text links.
 package media
 
 import (

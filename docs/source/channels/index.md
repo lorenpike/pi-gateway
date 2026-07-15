@@ -1,6 +1,6 @@
 # Channels
 
-A **channel** is a logical, platform-stable conversation: a Telegram chat, an HTTP client-chosen `channel` string, (later) a Discord channel. The gateway binds at most one live `pi --mode rpc` process to any active channel at a time, and routes that channel's messages to it.
+A **channel** is a logical, platform-stable conversation: a Telegram chat, a Discord channel/thread/DM, or an HTTP client-chosen `channel` string. The gateway binds at most one live `pi --mode rpc` process to any active channel at a time, and routes that channel's messages to it.
 
 ## The channel contract
 
@@ -9,7 +9,7 @@ Every front-end (HTTP, Telegram, Discord) routes normal user turns through the s
 1. **Submit** a typed channel and message to the turn manager.
 2. If no turn is active for the channel, the manager acquires a pool slot, sends `prompt`, consumes `Slot.Events()`, and broadcasts events to subscribers.
 3. If a turn is already active for the same channel, the manager sends pi `steer` (or `prompt` with `streamingBehavior=steer` for extension slash commands) instead of acquiring again.
-4. Delivery adapters subscribe to the broadcast stream and decide how to render the assistant response: SSE for HTTP/CLI, edit-in-place messages for Telegram, etc.
+4. Delivery adapters subscribe to the broadcast stream and decide how to render the assistant response: SSE for HTTP/CLI, Telegram messages, or Discord edit-in-place previews plus authoritative final messages.
 
 Same-channel reuse stays **warm** (the process is not killed) for fast follow-up turns. Cross-channel reuse claims the LRU idle slot and respawns the process so runtime channel identity remains correct.
 
@@ -22,7 +22,7 @@ A chat user or CLI/HTTP caller can send a second message while the agent is stil
 slot.Client().Steer(ctx, message)   // NOT pool.Acquire again
 ```
 
-Because this active-turn state is shared, a cron/CLI prompt can steer an in-flight Telegram turn, and a human Telegram message can steer a turn originally started by `/v1/prompt`.
+Because this active-turn state is shared, a cron/CLI prompt can steer an in-flight Telegram or Discord turn, and a human chat message can steer a turn originally started by `/v1/prompt`.
 
 ## Channel identity
 
@@ -32,7 +32,7 @@ Because this active-turn state is shared, a cron/CLI prompt can steer an in-flig
 |---|---|
 | HTTP | `channelType: "http"` plus client-chosen `channel` field in the JSON body |
 | Telegram | `channelType: "telegram"` plus the Telegram chat id, as a decimal string |
-| Discord (planned) | the Discord channel id |
+| Discord | `channelType: "discord"` plus the Discord channel, thread, or DM channel snowflake string |
 
 The ChannelID is also the prefix of the on-disk transcript filename — see [Sessions](../sessions).
 
@@ -59,4 +59,5 @@ This preserves the important fast path for repeated messages in one chat while a
 
 http
 telegram
+discord
 ```

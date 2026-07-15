@@ -46,6 +46,8 @@ import (
 type ChatConfig struct {
 	// Telegram holds the parsed WALLE_TELEGRAM_* values.
 	Telegram TelegramConfig
+	// Discord holds the parsed WALLE_DISCORD_* values.
+	Discord DiscordConfig
 }
 
 // TelegramConfig holds the Telegram front-end settings.
@@ -54,6 +56,13 @@ type TelegramConfig struct {
 	Token string
 	// AllowedChats is the optional chat-id allowlist (empty = allow all).
 	AllowedChats []int64
+}
+
+// DiscordConfig holds the Discord front-end settings. Snowflakes remain
+// decimal strings because they may exceed signed integer ranges.
+type DiscordConfig struct {
+	Token           string
+	AllowedChannels []string
 }
 
 // Default values. Exported so tests and main can reference them.
@@ -191,6 +200,14 @@ func Load() (Config, error) {
 	}
 	cfg.Chat.Telegram.AllowedChats = allowedChats
 
+	// --- WALLE_DISCORD_TOKEN / WALLE_DISCORD_ALLOWED_CHANNELS ------------
+	cfg.Chat.Discord.Token = os.Getenv("WALLE_DISCORD_TOKEN")
+	allowedChannels, err := parseSnowflakeListEnv("WALLE_DISCORD_ALLOWED_CHANNELS")
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	cfg.Chat.Discord.AllowedChannels = allowedChannels
+
 	if len(errs) > 0 {
 		return cfg, fmt.Errorf("config: %s", strings.Join(errs, "; "))
 	}
@@ -231,6 +248,35 @@ func parseIntEnv(name string, def int) (int, error) {
 // parseInt64ListEnv reads a comma-separated list of int64 values (e.g.
 // "123,-456,789"). An empty/unset value returns nil (no error) so the var is
 // optional. Whitespace around each element is trimmed.
+func parseSnowflakeListEnv(name string) ([]string, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return nil, nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return nil, fmt.Errorf("invalid %s %q: snowflakes must be unsigned decimal strings", name, v)
+			}
+		}
+		if !seen[part] {
+			seen[part] = true
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
 func parseInt64ListEnv(name string) ([]int64, error) {
 	v := os.Getenv(name)
 	if v == "" {

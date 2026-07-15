@@ -24,11 +24,14 @@ These variables are read by `wall-e run`.
 | `WALLE_MODEL` | no | pi settings default | Passed to pi as `--model`. Primarily useful when benchmarking another model. |
 | `WALLE_TELEGRAM_TOKEN` | no | — | Telegram bot token. Telegram is disabled when unset. |
 | `WALLE_TELEGRAM_ALLOWED_CHATS` | no | allow all | Comma-separated signed Telegram chat IDs. Whitespace is ignored. |
+| `WALLE_DISCORD_TOKEN` | no | — | Discord bot token. Discord is disabled when unset. |
+| `WALLE_DISCORD_ALLOWED_CHANNELS` | no | allow all | Comma-separated Discord channel/thread snowflake strings. Whitespace and duplicates are ignored; signs and non-decimal values are rejected. |
 
 Durations use Go duration syntax, for example `30s`, `5m`, or `1h`. Duration
 values must be positive.
 
-Telegram command registration is always enabled. Confirmation dialogs from pi
+Telegram command registration and Discord global application-command
+registration are enabled automatically. Confirmation dialogs from pi
 extensions use pi's default gateway policy, which confirms them. The pi binary
 is always resolved as `pi` from `PATH`.
 
@@ -50,6 +53,7 @@ Each pi process receives the typed address of the channel it currently serves:
 ```sh
 echo "$WALLE_CHANNEL"
 # telegram:123456789
+# or discord:123456789012345678
 ```
 
 The pool respawns pi when a slot changes channels so this value cannot become

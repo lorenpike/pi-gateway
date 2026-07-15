@@ -45,6 +45,19 @@ func main() {
 	os.Exit(mainWithArgs(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
+type discordFrontend interface {
+	chat.Frontend
+	httpapi.PromptAdapter
+	httpapi.SendAdapter
+}
+
+// newDiscordFrontend is a process-level seam for main wiring tests. Production
+// always constructs the discordgo-backed adapter; tests replace it with a
+// network-free fake.
+var newDiscordFrontend = func(cfg chat.DiscordConfig, p *pool.Pool) (discordFrontend, error) {
+	return chat.NewDiscord(cfg, p, nil)
+}
+
 func mainWithArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		printUsage(stdout)
@@ -467,33 +480,39 @@ func consumeSSE(r io.Reader, out io.Writer) error {
 	return errors.New("gateway stream ended before done")
 }
 
-// telegramCommandProvider discovers pi RPC slash commands for Telegram by
-// launching a short-lived no-session RPC process. It deliberately does not use
-// the shared pool so command registration cannot consume a worker slot or bind
-// to a user/channel session.
-func telegramCommandProvider(base rpc.Config) func(context.Context) ([]rpc.Command, error) {
+// chatCommandProvider discovers pi RPC slash commands once and shares the
+// result across enabled chat front-ends. It deliberately does not consume a
+// worker slot or bind to a user session.
+func chatCommandProvider(base rpc.Config) func(context.Context) ([]rpc.Command, error) {
+	var once sync.Once
+	var commands []rpc.Command
+	var discoveryErr error
 	return func(ctx context.Context) ([]rpc.Command, error) {
-		discoverCfg := base
-		discoverCfg.SessionDir = ""
-		discoverCfg.NoSession = true
-		if discoverCfg.RequestTimeout == 0 {
-			discoverCfg.RequestTimeout = 30 * time.Second
-		}
-		client, err := rpc.New(discoverCfg)
-		if err != nil {
-			return nil, err
-		}
-		drainDone := make(chan struct{})
-		go func() {
-			defer close(drainDone)
-			for range client.Events() {
+		once.Do(func() {
+			discoverCfg := base
+			discoverCfg.SessionDir = ""
+			discoverCfg.NoSession = true
+			if discoverCfg.RequestTimeout == 0 {
+				discoverCfg.RequestTimeout = 30 * time.Second
 			}
-		}()
-		defer func() {
-			_ = client.Close()
-			<-drainDone
-		}()
-		return client.ListCommands(ctx)
+			client, err := rpc.New(discoverCfg)
+			if err != nil {
+				discoveryErr = err
+				return
+			}
+			drainDone := make(chan struct{})
+			go func() {
+				defer close(drainDone)
+				for range client.Events() {
+				}
+			}()
+			defer func() {
+				_ = client.Close()
+				<-drainDone
+			}()
+			commands, discoveryErr = client.ListCommands(ctx)
+		})
+		return commands, discoveryErr
 	}
 }
 
@@ -536,15 +555,15 @@ func run(ctx context.Context, cfg config.Config) error {
 
 	mediaStore := media.NewStore(cfg.SessionDir)
 
-	// 5. Optional chat front-ends. Telegram is started only if a bot token is
-	//    configured; otherwise the gateway serves HTTP alone. A Start failure
-	//    (e.g. bad token / network) is logged but non-fatal — HTTP still serves.
+	// 5. Optional chat front-ends. Startup failures are non-fatal so HTTP and
+	//    any other configured front-end remain available.
 	var frontends []chat.Frontend
+	commandProvider := chatCommandProvider(cfg.RPC)
 	if cfg.Chat.Telegram.Token != "" {
 		tb, err := chat.NewTelegram(chat.Config{
 			Token:           cfg.Chat.Telegram.Token,
 			AllowedChats:    cfg.Chat.Telegram.AllowedChats,
-			CommandProvider: telegramCommandProvider(cfg.RPC),
+			CommandProvider: commandProvider,
 			Turns:           turns,
 			MediaStore:      mediaStore,
 		}, p, nil)
@@ -567,6 +586,60 @@ func run(ctx context.Context, cfg config.Config) error {
 	} else {
 		log.Printf("telegram: disabled (WALLE_TELEGRAM_TOKEN unset)")
 	}
+
+	if cfg.Chat.Discord.Token != "" {
+		db, err := newDiscordFrontend(chat.DiscordConfig{
+			Token:           cfg.Chat.Discord.Token,
+			AllowedChannels: cfg.Chat.Discord.AllowedChannels,
+			CommandProvider: commandProvider,
+			Turns:           turns,
+			MediaStore:      mediaStore,
+		}, p)
+		if err != nil {
+			log.Printf("discord: disabled: %v", err)
+		} else if err := db.Start(ctx); err != nil {
+			log.Printf("discord: start failed: %v (HTTP still serves)", err)
+		} else {
+			frontends = append(frontends, db)
+			if cfg.HTTP.PromptAdapters == nil {
+				cfg.HTTP.PromptAdapters = make(map[string]httpapi.PromptAdapter)
+			}
+			cfg.HTTP.PromptAdapters["discord"] = db
+			if cfg.HTTP.SendAdapters == nil {
+				cfg.HTTP.SendAdapters = make(map[string]httpapi.SendAdapter)
+			}
+			cfg.HTTP.SendAdapters["discord"] = db
+			log.Printf("discord: front-end started")
+		}
+	} else {
+		log.Printf("discord: disabled (WALLE_DISCORD_TOKEN unset)")
+	}
+
+	// Ensure an early HTTP bind/serve failure cannot leave a connected chat
+	// Gateway or worker process behind. The normal shutdown path clears this
+	// flag after it drains the same components.
+	needsFallbackCleanup := true
+	defer func() {
+		if !needsFallbackCleanup {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cfg.Pool.DrainTimeout+5*time.Second)
+		defer cancel()
+		var cleanupWG sync.WaitGroup
+		for _, frontend := range frontends {
+			cleanupWG.Add(1)
+			go func(fe chat.Frontend) {
+				defer cleanupWG.Done()
+				_ = fe.Stop(cleanupCtx)
+			}(frontend)
+		}
+		cleanupWG.Add(1)
+		go func() {
+			defer cleanupWG.Done()
+			_ = p.Shutdown(cleanupCtx)
+		}()
+		cleanupWG.Wait()
+	}()
 
 	// 3. HTTP server. We own the *http.Server (rather than calling
 	//    httpapi.Server.ListenAndServe) so we can Shutdown it gracefully and
@@ -639,6 +712,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		}(fe)
 	}
 	wg.Wait()
+	needsFallbackCleanup = false
 
 	// Drain Serve's return value (ErrServerClosed after Shutdown).
 	<-serveErr

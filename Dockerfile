@@ -1,5 +1,5 @@
 FROM golang:1.26 AS build
-# Static binary; no cgo (stdlib-only, no platform libc tie-in).
+# Static binary; no cgo and no platform libc tie-in.
 COPY src/ src/
 RUN CGO_ENABLED=0 GOOS=linux cd src && go build -trimpath -o /usr/local/bin/wall-e .
 

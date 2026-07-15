@@ -24,6 +24,8 @@ var allWalleEnv = []string{
 	"WALLE_MODEL",
 	"WALLE_TELEGRAM_TOKEN",
 	"WALLE_TELEGRAM_ALLOWED_CHATS",
+	"WALLE_DISCORD_TOKEN",
+	"WALLE_DISCORD_ALLOWED_CHANNELS",
 }
 
 // clearWalleEnv unsets every WALLE_* var Load reads, for a known-clean start.
@@ -352,6 +354,52 @@ func TestLoad_TelegramDefaultsAndParsing(t *testing.T) {
 			t.Errorf("error %q does not mention WALLE_TELEGRAM_ALLOWED_CHATS", err.Error())
 		}
 	})
+}
+
+func TestLoad_DiscordDefaultsAndParsing(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Chat.Discord.Token != "" || cfg.Chat.Discord.AllowedChannels != nil {
+			t.Fatalf("Discord config = %+v", cfg.Chat.Discord)
+		}
+	})
+
+	t.Run("normalizes and deduplicates string snowflakes", func(t *testing.T) {
+		clearWalleEnv(t)
+		t.Setenv("WALLE_TOKEN", "x")
+		t.Setenv("WALLE_DISCORD_TOKEN", "bot-secret")
+		t.Setenv("WALLE_DISCORD_ALLOWED_CHANNELS", " 18446744073709551615, 00123,,18446744073709551615 ")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"18446744073709551615", "00123"}
+		if len(cfg.Chat.Discord.AllowedChannels) != len(want) {
+			t.Fatalf("AllowedChannels = %v", cfg.Chat.Discord.AllowedChannels)
+		}
+		for i := range want {
+			if cfg.Chat.Discord.AllowedChannels[i] != want[i] {
+				t.Fatalf("AllowedChannels = %v, want %v", cfg.Chat.Discord.AllowedChannels, want)
+			}
+		}
+	})
+
+	for _, value := range []string{"-1", "+1", "12x", "1.0"} {
+		t.Run("rejects "+value, func(t *testing.T) {
+			clearWalleEnv(t)
+			t.Setenv("WALLE_TOKEN", "x")
+			t.Setenv("WALLE_DISCORD_ALLOWED_CHANNELS", value)
+			_, err := Load()
+			if err == nil || !contains(err.Error(), "WALLE_DISCORD_ALLOWED_CHANNELS") {
+				t.Fatalf("Load error = %v", err)
+			}
+		})
+	}
 }
 
 // contains is a tiny strings.Contains so the test file doesn't need to import

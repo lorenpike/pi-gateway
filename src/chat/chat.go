@@ -1,5 +1,5 @@
-// Package chat implements the wall-e chat front-ends (Telegram, and later
-// Discord). Each front-end reads messages from a chat platform, routes every
+// Package chat implements the wall-e Telegram and Discord front-ends. Each
+// front-end reads messages from a chat platform, routes every
 // chat to the shared worker pool (one live `pi --mode rpc` process per chat,
 // bound via pool.Acquire/Release), and delivers the assistant reply using the
 // platform's preferred response behavior.
@@ -9,8 +9,8 @@
 // serialization would otherwise block the second message until the first turn
 // Releases, which is not the desired chat UX.
 //
-// The platform-facing surface is a small interface (TelegramAPI / future
-// DiscordAPI) so the real adapter (telegram.go, hand-rolled over net/http) is a
+// The platform-facing surface is a small interface (TelegramAPI / DiscordAPI)
+// so each real transport adapter is a
 // thin shim and unit tests inject a fake — no network is hit in tests.
 //
 // The bot owns NO per-channel serialization: that lives in the pool. Active
@@ -745,111 +745,18 @@ func (b *Bot) chatHasActiveTurn(chatID int64) bool {
 }
 
 func (b *Bot) handleAbortCommand(chatID int64) {
-	resp, err := b.turns.Abort(b.ctx, telegramChannelID(chatID))
-	if errors.Is(err, turn.ErrNoActiveTurn) {
-		_, _ = b.api.SendMessage(b.ctx, chatID, "No active pi turn to abort.", 0)
-		return
-	}
-	if err != nil || !resp.Success {
-		b.sendCommandError(chatID, "abort", resp, err)
-		return
-	}
-	_, _ = b.api.SendMessage(b.ctx, chatID, "Aborted current pi turn.", 0)
+	b.handleGatewayCommand(chatID, "abort", "")
 }
 
 func (b *Bot) handleGatewayCommand(chatID int64, cmdName, args string) {
-	chID := telegramChannelID(chatID)
-	slot, err := b.pool.Acquire(b.ctx, chID)
+	text, err := executeGatewayCommand(b.ctx, b.pool, b.turns, telegramChannelID(chatID), cmdName, args)
 	if err != nil {
-		log.Printf("telegram: /%s acquire chat %d: %v", cmdName, chatID, err)
-		_, _ = b.api.SendMessage(b.ctx, chatID, "⚠️ no agent available: "+err.Error(), 0)
-		return
+		log.Printf("telegram: /%s chat %d: %v", cmdName, chatID, err)
+		text = "⚠️ " + err.Error()
 	}
-	defer b.pool.Release(chID)
-
-	client := slot.Client()
-	switch cmdName {
-	case "name":
-		resp, err := client.SetSessionName(b.ctx, strings.TrimSpace(args))
-		if err != nil || !resp.Success {
-			b.sendCommandError(chatID, "name", resp, err)
-			return
-		}
-		if strings.TrimSpace(args) == "" {
-			_, _ = b.api.SendMessage(b.ctx, chatID, "Session name cleared.", 0)
-		} else {
-			_, _ = b.api.SendMessage(b.ctx, chatID, "Session name set to: "+strings.TrimSpace(args), 0)
-		}
-	case "session":
-		st, err := client.GetState(b.ctx)
-		if err != nil {
-			b.sendCommandError(chatID, "session", rpc.Response{}, err)
-			return
-		}
-		text := fmt.Sprintf("Session\nID: %s\nName: %s\nMessages: %d\nStreaming: %v", emptyDash(st.SessionID), emptyDash(st.SessionName), st.MessageCount, st.IsStreaming)
+	if text != "" {
 		_, _ = b.api.SendMessage(b.ctx, chatID, text, 0)
-	case "new":
-		// Do not use pi's new_session directly here: it generates pi-default
-		// filenames that /v1/sessions intentionally ignores. Switching to a
-		// fresh wall-e path creates the same fresh context while preserving the
-		// typed filename scheme used by the session viewer.
-		newPath := b.pool.NewSessionPath(chID)
-		resp, _, err := client.SwitchSession(b.ctx, newPath)
-		if err != nil || !resp.Success {
-			b.sendCommandError(chatID, "new", resp, err)
-			return
-		}
-		if err := b.pool.ResyncFromState(chID, newPath); err != nil {
-			b.sendCommandError(chatID, "new", rpc.Response{}, err)
-			return
-		}
-		_, _ = b.api.SendMessage(b.ctx, chatID, "Started a new pi session.", 0)
-	case "clone":
-		resp, st, err := client.Clone(b.ctx)
-		if err != nil || !resp.Success {
-			b.sendCommandError(chatID, "clone", resp, err)
-			return
-		}
-		clonePath := b.pool.NewSessionPath(chID)
-		if st.SessionFile == "" {
-			b.sendCommandError(chatID, "clone", rpc.Response{}, errors.New("clone returned empty session file"))
-			return
-		}
-		if err := b.pool.CopySessionFile(st.SessionFile, clonePath); err != nil {
-			b.sendCommandError(chatID, "clone", rpc.Response{}, err)
-			return
-		}
-		resp, _, err = client.SwitchSession(b.ctx, clonePath)
-		if err != nil || !resp.Success {
-			b.sendCommandError(chatID, "clone", resp, err)
-			return
-		}
-		if err := b.pool.ResyncFromState(chID, clonePath); err != nil {
-			b.sendCommandError(chatID, "clone", rpc.Response{}, err)
-			return
-		}
-		if st.SessionFile != clonePath {
-			_ = b.pool.RemoveSessionFile(st.SessionFile)
-		}
-		_, _ = b.api.SendMessage(b.ctx, chatID, "Cloned this pi session branch.", 0)
-	case "compact":
-		resp, err := client.Compact(b.ctx, strings.TrimSpace(args))
-		if err != nil || !resp.Success {
-			b.sendCommandError(chatID, "compact", resp, err)
-			return
-		}
-		_, _ = b.api.SendMessage(b.ctx, chatID, "Compacted this pi session.", 0)
 	}
-}
-
-func (b *Bot) sendCommandError(chatID int64, name string, resp rpc.Response, err error) {
-	msg := "⚠️ /" + name + " failed"
-	if err != nil {
-		msg += ": " + err.Error()
-	} else if resp.Error != "" {
-		msg += ": " + resp.Error
-	}
-	_, _ = b.api.SendMessage(b.ctx, chatID, msg, 0)
 }
 
 func emptyDash(s string) string {

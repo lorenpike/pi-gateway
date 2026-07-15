@@ -26,9 +26,10 @@ under `WALLE_SESSION_DIR` (default `/home/wall-e/sessions`). For example:
 ```text
 http--smoke--20260702T153012Z--a1b2c3d4e5f6a7b8.jsonl
 telegram--123456789--20260702T153055Z--d9876cafe1234567.jsonl
+discord--123456789012345678--20260702T153100Z--0123456789abcdef.jsonl
 ```
 
-- `channel-type` is `http`, `telegram`, and future `discord`, `slack`, etc.
+- `channel-type` is currently `http`, `telegram`, or `discord`.
 - `channel-id` is the platform/channel identifier, sanitized for filenames.
 - The datestamp is UTC and lexicographically sortable.
 - `<uuid>` is 8 random bytes hex-encoded (16 chars), with a time-based fallback so generation never blocks.
@@ -59,7 +60,7 @@ Construct typed ids with `session.NewChannelID(channelType, channelID)`:
 |---|---|---|
 | HTTP | `http` | the `channel` field from the JSON body |
 | Telegram | `telegram` | the Telegram chat id, decimal string |
-| Discord (planned) | `discord` | the Discord channel id |
+| Discord | `discord` | the Discord channel, thread, or DM channel snowflake string |
 
 The local debug UI displays channel type and session date, but not raw channel id or uuid.
 
