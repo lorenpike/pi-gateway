@@ -79,7 +79,9 @@ is still loaded by pi as appended environment context.
 ## Configuration
 
 See the Sphinx [environment-variable documentation](docs/source/environment.md)
-for gateway, CLI, credential, container, and benchmark configuration.
+for gateway, CLI, credential, container, and benchmark configuration. See
+[Composio](docs/source/composio.md) to connect email,
+calendars, source control, messaging, and other external services.
 
 ## Develop
 

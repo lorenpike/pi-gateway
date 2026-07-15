@@ -18,6 +18,13 @@ channels/index
 
 ```{toctree}
 :maxdepth: 2
+:caption: Integrations
+
+composio
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: Internals
 
 sessions
@@ -41,7 +48,7 @@ make docker            # build + run the gateway container (tini PID 1 -> superv
 make stop              # docker stop (graceful drain within WALLE_DRAIN_TIMEOUT)
 ```
 
-See [Environment variables](environment) for gateway, CLI, credential, container, and benchmark configuration. Front-end-specific setup lives under [Channels](channels/index).
+See [Environment variables](environment) for gateway, CLI, credential, container, and benchmark configuration. Front-end-specific setup lives under [Channels](channels/index). To connect email, calendars, source control, messaging, and other services, see [Composio](composio).
 
 ## Source layout
 

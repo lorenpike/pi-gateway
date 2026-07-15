@@ -73,7 +73,9 @@ container, and pi or an installed tool consumes them.
 
 The normal container also bind-mounts `build/auth.json` and
 `build/pi-settings.json` into `/opt/pi`. Provider authentication may therefore
-come from pi's auth file rather than an API-key environment variable.
+come from pi's auth file rather than an API-key environment variable. Composio
+uses its own browser authorization flow rather than a gateway environment
+variable; see [Composio](composio).
 
 ## Container environment
 
@@ -108,7 +110,7 @@ be placed in `.env`.
 |---|---|---|
 | `CGO_ENABLED` | `0` | Builds a static gateway binary without cgo. |
 | `GOOS` | `linux` | Targets the container operating system. |
-| `COMPOSIO_INSTALL_DIR` | `/opt/composio` | Selects the installation directory while the image installs Composio. It is not a runtime variable. |
+| `COMPOSIO_INSTALL_DIR` | `/opt/composio` | Selects the installation directory while the image installs [Composio](composio). It is not a runtime variable. |
 | `CC` | `x86_64-w64-mingw32-gcc` | Selected by `make test` only when `RACE=1` on Windows. |
 
 ## Environment inheritance and secrets

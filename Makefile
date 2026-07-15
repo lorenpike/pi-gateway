@@ -48,6 +48,9 @@ docker: $(BUILD)/docker-stamp $(BUILD)/auth.json $(BUILD)/pi-settings.json
 	# -e CLOUDFLARE_TOKEN
 	@docker run -d \
 		--name $(IMAGE) \
+		-e COLORTERM \
+		-e LANG \
+		-e LC_ALL \
 		-e TZ \
 		-e WALLE_TOKEN \
 		-e WALLE_PORT \
