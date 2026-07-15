@@ -31,7 +31,10 @@ type fakeHandlerCfg struct {
 	// streamDone: if non-nil, a prompt emits agent_start then waits for this
 	// channel to be closed before emitting agent_end (simulating a long
 	// stream). If nil, the agent streams its assistant text and ends.
-	streamDone chan struct{}
+	streamDone    chan struct{}
+	promptError   string
+	agentError    string
+	retryThenText bool
 }
 
 func makeHandler(cfg fakeHandlerCfg) func(f *fakePI, cmd map[string]any) {
@@ -49,8 +52,31 @@ func makeHandler(cfg fakeHandlerCfg) func(f *fakePI, cmd map[string]any) {
 				},
 			})
 		case "prompt":
+			if cfg.promptError != "" {
+				f.writeResp(id, "prompt", false, map[string]any{"error": cfg.promptError})
+				return
+			}
 			f.writeResp(id, "prompt", true, nil)
-			if cfg.streamDone != nil {
+			if cfg.agentError != "" {
+				f.writeJSON(map[string]any{"type": "agent_start"})
+				f.writeJSON(map[string]any{
+					"type": "agent_end",
+					"messages": []map[string]any{{
+						"role": "assistant", "stopReason": "error", "errorMessage": cfg.agentError,
+					}},
+					"willRetry": false,
+				})
+			} else if cfg.retryThenText {
+				f.writeJSON(map[string]any{"type": "agent_start"})
+				f.writeJSON(map[string]any{
+					"type": "agent_end",
+					"messages": []map[string]any{{
+						"role": "assistant", "stopReason": "error", "errorMessage": "temporary overload",
+					}},
+					"willRetry": true,
+				})
+				f.emitAssistantText("Hello ", "world")
+			} else if cfg.streamDone != nil {
 				// Withhold agent_end until streamDone closes; abort will
 				// short-circuit it.
 				f.writeJSON(map[string]any{"type": "agent_start"})
@@ -545,6 +571,56 @@ func TestPrompt_OK_StreamsSSE(t *testing.T) {
 	}
 	if text != "Hello world" {
 		t.Fatalf("concatenated delta text = %q, want %q", text, "Hello world")
+	}
+}
+
+func TestPrompt_RejectedBeforeAcceptance_502(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl", promptError: "model unavailable"}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channelType":"http","channel":"c1","message":"hi"}`)
+	if rr.Code != 502 {
+		t.Fatalf("status = %d, want 502; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "model unavailable") {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestPrompt_ProviderError_StreamsError(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl", agentError: "402: insufficient credits"}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channelType":"http","channel":"c1","message":"hi"}`)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	events := readSSE(t, rr.Body, 2*time.Second)
+	if want := []string{"agent_start", "error"}; !equalStringSlices(sseNames(events), want) {
+		t.Fatalf("event names = %v, want %v", sseNames(events), want)
+	}
+	if !strings.Contains(events[len(events)-1].data, "402: insufficient credits") {
+		t.Fatalf("error event = %q", events[len(events)-1].data)
+	}
+}
+
+func TestPrompt_AutomaticRetry_DoesNotSurfaceIntermediateError(t *testing.T) {
+	p, _, _ := testPool(t, 1, func(i int) fakeHandlerCfg {
+		return fakeHandlerCfg{sessionFile: "/fake/s.jsonl", retryThenText: true}
+	})
+	s := newServer(t, p, Config{Token: "sekret"})
+
+	rr := do(t, s, http.MethodPost, "/v1/prompt", "Bearer sekret", `{"channelType":"http","channel":"c1","message":"hi"}`)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	events := readSSE(t, rr.Body, 2*time.Second)
+	if want := []string{"agent_start", "agent_start", "delta", "delta", "agent_end", "done"}; !equalStringSlices(sseNames(events), want) {
+		t.Fatalf("event names = %v, want %v", sseNames(events), want)
 	}
 }
 

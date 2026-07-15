@@ -522,8 +522,11 @@ func (b *DiscordBot) streamDiscordSubscription(channelID string, sub *turn.Subsc
 				}
 			}
 			if event.Type == rpc.EventAgentEnd {
-				finalize()
-				return
+				outcome, err := rpc.DecodeAgentEndOutcome(event.Raw)
+				if err != nil || !outcome.WillRetry {
+					finalize()
+					return
+				}
 			}
 		}
 	}
@@ -791,6 +794,10 @@ func (b *DiscordBot) streamInteraction(interaction DiscordInteraction, sub *turn
 				}
 			}
 			if event.Type == rpc.EventAgentEnd {
+				outcome, err := rpc.DecodeAgentEndOutcome(event.Raw)
+				if err == nil && outcome.WillRetry {
+					continue
+				}
 				final, finalOK := <-sub.FinalText
 				if !finalOK {
 					b.editInteractionText(interaction, "⚠️ response ended before completion")

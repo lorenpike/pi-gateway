@@ -80,6 +80,18 @@ class Container:
         self.process = subprocess.Popen(cmd + [IMAGE], stdout=self.log, stderr=self.log)
         self.cid()
 
+    def execute(self, *command: str, user: str = "wall-e") -> str:
+        """Execute a command in the running benchmark container."""
+        if self.process is None or self.process.poll() is not None:
+            raise RuntimeError("container is not running")
+        return subprocess.run(
+            ["docker", "exec", "-u", user, self.cid(), *command],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+
     def stop(self) -> None:
         cid = (
             self.cidfile.read_text().strip()

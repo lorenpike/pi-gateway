@@ -20,9 +20,12 @@ package httpapi
 // -----------------
 //   pi EventAgentStart  → event: agent_start\ndata: {}\n\n
 //   pi EventMessageUpdate with text_delta → event: delta\ndata: {"text":...}\n\n
-//   pi EventAgentEnd    → event: agent_end\ndata: {}\n\n
-//   turn complete       → event: done\ndata: {}\n\n
-//   error mid-stream    → event: error\ndata: {"message":"..."}\n\n then close
+//   terminal pi EventAgentEnd → event: agent_end\ndata: {}\n\n
+//   turn complete             → event: done\ndata: {}\n\n
+//   provider/stream error      → event: error\ndata: {"message":"..."}\n\n then close
+//
+// Non-terminal agent_end events with willRetry:true remain internal while pi
+// automatically retries the failed provider call.
 
 import (
 	"bytes"
@@ -487,6 +490,22 @@ streamLoop:
 			case rpc.EventAgentStart:
 				writeSSE(w, "agent_start", "{}")
 			case rpc.EventAgentEnd:
+				outcome, err := rpc.DecodeAgentEndOutcome(ev.Raw)
+				if err != nil {
+					b, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("invalid agent_end event: %v", err)})
+					writeSSE(w, "error", string(b))
+					flusher.Flush()
+					return
+				}
+				if outcome.WillRetry {
+					continue
+				}
+				if outcome.ErrorMessage != "" {
+					b, _ := json.Marshal(map[string]string{"message": outcome.ErrorMessage})
+					writeSSE(w, "error", string(b))
+					flusher.Flush()
+					return
+				}
 				writeSSE(w, "agent_end", "{}")
 				turnDone = true
 			case rpc.EventMessageUpdate:

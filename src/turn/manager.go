@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -249,6 +250,14 @@ func (t *Turn) run(acquireCtx context.Context, message string) {
 	}()
 
 	slot, err := t.mgr.pool.Acquire(acquireCtx, t.channel)
+	if err == nil {
+		defer t.mgr.pool.Release(t.channel)
+		var resp rpc.Response
+		resp, err = slot.Client().Prompt(t.mgr.ctx, message, false)
+		if err == nil && !resp.Success {
+			err = fmt.Errorf("rpc: prompt failed: %s", resp.Error)
+		}
+	}
 	t.mu.Lock()
 	t.slot = slot
 	t.acquireErr = err
@@ -257,11 +266,7 @@ func (t *Turn) run(acquireCtx context.Context, message string) {
 	if err != nil {
 		return
 	}
-	defer t.mgr.pool.Release(t.channel)
 
-	if _, err := slot.Client().Prompt(t.mgr.ctx, message, false); err != nil {
-		return
-	}
 	for ev := range slot.Events() {
 		if ev.Type == rpc.EventMessageUpdate {
 			if delta, ok := turnTextDelta(ev.Raw); ok {
@@ -270,7 +275,11 @@ func (t *Turn) run(acquireCtx context.Context, message string) {
 		}
 		t.broadcast(ev)
 		if ev.Type == rpc.EventAgentEnd {
-			completed = true
+			outcome, decodeErr := rpc.DecodeAgentEndOutcome(ev.Raw)
+			if decodeErr == nil && outcome.WillRetry {
+				continue
+			}
+			completed = decodeErr == nil && outcome.ErrorMessage == ""
 			return
 		}
 	}

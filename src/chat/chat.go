@@ -865,7 +865,8 @@ func (b *Bot) streamSubscription(chatID int64, sub *turn.Subscription, stopTypin
 					buf.WriteString(d)
 				}
 			case rpc.EventAgentEnd:
-				turnDone = true
+				outcome, err := rpc.DecodeAgentEndOutcome(ev.Raw)
+				turnDone = err != nil || !outcome.WillRetry
 			}
 		case <-idleC:
 			log.Printf("telegram: turn idle for %s, ending delivery for chat %d", b.idleTimeout, chatID)

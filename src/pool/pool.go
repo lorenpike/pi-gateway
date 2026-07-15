@@ -617,7 +617,10 @@ func (p *Pool) startForwarder(s *slot) {
 			case rpc.EventAgentStart:
 				s.streaming.Store(true)
 			case rpc.EventAgentEnd:
-				s.streaming.Store(false)
+				outcome, err := rpc.DecodeAgentEndOutcome(ev.Raw)
+				if err != nil || !outcome.WillRetry {
+					s.streaming.Store(false)
+				}
 			}
 			select {
 			case s.events <- ev:

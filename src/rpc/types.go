@@ -91,6 +91,66 @@ type Event struct {
 	Raw json.RawMessage
 }
 
+// AgentEndOutcome describes whether an agent_end is terminal and whether its
+// final assistant message failed. Provider/API failures happen after a prompt
+// has been accepted, so pi reports them here rather than in the prompt Response.
+type AgentEndOutcome struct {
+	WillRetry    bool
+	ErrorMessage string
+}
+
+// DecodeAgentEndOutcome extracts retry and provider-error state from an
+// agent_end event. The last assistant message is authoritative: an earlier
+// failed attempt may be followed by a successful automatic retry.
+func DecodeAgentEndOutcome(raw json.RawMessage) (AgentEndOutcome, error) {
+	var envelope struct {
+		Type      string `json:"type"`
+		WillRetry bool   `json:"willRetry"`
+		Messages  []struct {
+			Role         string `json:"role"`
+			StopReason   string `json:"stopReason"`
+			ErrorMessage string `json:"errorMessage"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return AgentEndOutcome{}, err
+	}
+	if envelope.Type != EventAgentEnd {
+		return AgentEndOutcome{}, &unexpectedEventTypeError{got: envelope.Type, want: EventAgentEnd}
+	}
+
+	out := AgentEndOutcome{WillRetry: envelope.WillRetry}
+	for i := len(envelope.Messages) - 1; i >= 0; i-- {
+		message := envelope.Messages[i]
+		if message.Role != "assistant" {
+			continue
+		}
+		switch message.StopReason {
+		case "error":
+			out.ErrorMessage = message.ErrorMessage
+			if out.ErrorMessage == "" {
+				out.ErrorMessage = "agent request failed"
+			}
+		case "aborted":
+			out.ErrorMessage = message.ErrorMessage
+			if out.ErrorMessage == "" {
+				out.ErrorMessage = "agent request aborted"
+			}
+		}
+		break
+	}
+	return out, nil
+}
+
+type unexpectedEventTypeError struct {
+	got  string
+	want string
+}
+
+func (e *unexpectedEventTypeError) Error() string {
+	return "rpc: unexpected event type " + e.got + ", want " + e.want
+}
+
 // EventType constants for the events wall-e currently cares about. The list is
 // not exhaustive; unknown types are still delivered on Events with their Type
 // set to whatever pi sent.

@@ -46,7 +46,7 @@ Bearer auth (`WALLE_TOKEN`). Body:
 - `channel` (required) — the stable id within that channel type. For `http`, pick anything stable per conversation. For `telegram`, use the Telegram chat id.
 - `message` (required) — the user prompt text.
 
-On success it returns `200` with `Content-Type: text/event-stream` and streams the turn as SSE until `agent_end`, then a terminal `done` event. The target delivery adapter may also deliver the assistant response externally; for example `channelType: "telegram"` sends the assistant response to that Telegram chat while still streaming the same response to the HTTP caller.
+Once the prompt is accepted it returns `200` with `Content-Type: text/event-stream` and streams the turn as SSE until the terminal `agent_end`, then a `done` event. Provider failures after acceptance are returned as a terminal SSE `error` event. Non-terminal `agent_end` events produced before an automatic retry are kept internal. The target delivery adapter may also deliver the assistant response externally; for example `channelType: "telegram"` sends the assistant response to that Telegram chat while still streaming the same response to the HTTP caller.
 
 ## SSE event format
 
@@ -71,7 +71,7 @@ data: {}
 - `delta` — an incremental assistant text chunk (`message_update` with `assistantMessageEvent.type == "text_delta"`). Concatenate the `data.text` values for the full message. Other delta types (thinking, tool calls) are ignored in v1.
 - `agent_end` — the turn finished.
 - `done` — terminal; the stream closes.
-- `error` — `data: {"message":"..."}` — emitted if the stream ends without `agent_end` (e.g. the process died), then the stream closes.
+- `error` — `data: {"message":"..."}` — terminal provider/API failures and streams that end unexpectedly are surfaced here, then the stream closes without `done`.
 
 ## Auth
 
