@@ -104,9 +104,9 @@ bench:
 .PHONY: docs # Build and publish documentation
 docs: $(DOCS)/build/html/index.html
 	@echo 'Publishing documentation...'
-	@scp -r $(DOCS)/build/html/* $(DOCS_HOST):$(DOCS_ROOT)
 	@ssh $(DOCS_HOST) 'C:/cygwin64/bin/mkdir -p $(DOCS_ROOT)/v$(VERSION)' \
 		&& scp -r $(DOCS)/build/html/* $(DOCS_HOST):$(DOCS_ROOT)/v$(VERSION)
+	@scp -r $(DOCS)/build/html/* $(DOCS_HOST):$(DOCS_ROOT)
 	@echo 'Documentation published to https://files.metrized.com/private/docs/wall-e/'
 
 .PHONY: push # Publish the release image
